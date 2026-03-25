@@ -169,6 +169,23 @@ class FarDriverBLE(
 
         override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             val data = characteristic.value ?: return
+
+            // Check reset flags from settings
+            if (com.voltron.dash.render.DashboardRenderer.resetTrip) {
+                com.voltron.dash.render.DashboardRenderer.resetTrip = false
+                state.sessionKm = 0f
+                state.kwhUsed = 0f
+                state.sessionStartTime = System.currentTimeMillis()
+            }
+            if (com.voltron.dash.render.DashboardRenderer.resetAll) {
+                com.voltron.dash.render.DashboardRenderer.resetAll = false
+                state.sessionKm = 0f
+                state.kwhUsed = 0f
+                state.totalKm = 0f
+                state.totalHours = 0f
+                state.sessionStartTime = System.currentTimeMillis()
+            }
+
             val changed = FarDriverParser.parseFrame(data, state)
             if (changed) {
                 val snapshot = state.toData()

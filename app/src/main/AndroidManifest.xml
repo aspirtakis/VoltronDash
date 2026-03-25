@@ -1,12 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- BLE permissions -->
+    <!-- BLE permissions (Android 12+: no location needed with neverForLocation) -->
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Location only needed for BLE scan on Android 11 and below -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"
+        android:maxSdkVersion="30" />
 
     <!-- Android Auto surface access -->
     <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
@@ -15,13 +18,15 @@
 
     <application
         android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.VoltronDash">
 
-        <!-- Standalone fullscreen activity -->
+        <!-- Splash screen (launcher entry) -->
         <activity
-            android:name=".MainActivity"
+            android:name=".SplashActivity"
             android:exported="true"
             android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|keyboardHidden"
@@ -31,6 +36,28 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Standalone fullscreen activity -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/Theme.VoltronDash" />
+
+        <!-- Calibration/settings activity -->
+        <activity
+            android:name=".CalibrationActivity"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/Theme.VoltronDash" />
+
+        <!-- BMS detail screen -->
+        <activity
+            android:name=".BmsActivity"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/Theme.VoltronDash" />
 
         <!-- Android Auto car app service -->
         <service

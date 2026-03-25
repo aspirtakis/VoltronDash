@@ -1,7 +1,14 @@
 package com.voltron.dash.render
 
+import android.content.Context
 import android.graphics.*
+import android.graphics.drawable.BitmapDrawable
+import androidx.core.content.ContextCompat
+import com.voltron.dash.R
 import com.voltron.dash.ble.FarDriverData
+import com.voltron.dash.ble.JkBmsData
+import java.text.SimpleDateFormat
+import java.util.*
 import kotlin.math.*
 
 /**
@@ -10,214 +17,796 @@ import kotlin.math.*
  */
 object DashboardRenderer {
 
-    // Colors (matching web/PyQt5 theme)
-    private const val BG_DARK = 0xFF0F1E46.toInt()
-    private const val BG_PANEL = 0xFF1E3264.toInt()
-    private const val TEXT_PRI = 0xFFE6EBF5.toInt()
-    private const val TEXT_DIM = 0xFF8CA0C8.toInt()
-    private const val ACCENT_BLUE = 0xFF64C8FF.toInt()
-    private const val ACCENT_GREEN = 0xFF32DC6E.toInt()
+    // Modern dark theme colors
+    private const val BG_DARK = 0xFF0A1628.toInt()
+    private const val BG_CARD = 0xFF162040.toInt()
+    private const val BG_CARD_LIGHT = 0xFF1C2D54.toInt()
+    private const val TEXT_PRI = 0xFFE8EDF7.toInt()
+    private const val TEXT_DIM = 0xFF7A92BE.toInt()
+    private const val ACCENT_BLUE = 0xFF4DB8FF.toInt()
+    private const val ACCENT_GREEN = 0xFF2EE866.toInt()
     private const val ACCENT_YELLOW = 0xFFFFD232.toInt()
-    private const val ACCENT_RED = 0xFFFF4646.toInt()
-    private const val ACCENT_ORANGE = 0xFFFF9632.toInt()
-    private const val GAUGE_BG = 0xFF324678.toInt()
+    private const val ACCENT_RED = 0xFFFF4060.toInt()
+    private const val ACCENT_ORANGE = 0xFFFF8C32.toInt()
+    private const val GAUGE_BG = 0xFF2C4070.toInt()
     private const val NEEDLE_COLOR = 0xFFFF5A46.toInt()
+    private const val CARD_BORDER = 0xFF2A4080.toInt()
 
-    private const val MAX_AMPS = 200f
-    private const val MAX_RPM = 6000f
+    var maxAmps = 150f
+    var maxRpm = 5000f
     private const val BATTERY_TOTAL_KWH = 7.992f
 
-    // Reusable Paint objects
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = Typeface.MONOSPACE
     }
+    private val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val rectF = RectF()
 
     var glowPhase = 0f
+    var speedFactor = 0.38f
+    var resetTrip = false
+    var resetAll = false
+    var fdStatus = "FD: --"
+    var bmsStatus = "BMS: --"
+    private var logoBitmap: Bitmap? = null
 
-    fun draw(canvas: Canvas, w: Int, h: Int, data: FarDriverData) {
-        // Clear background
+    fun init(context: Context) {
+        if (logoBitmap == null) {
+            val drawable = ContextCompat.getDrawable(context, R.drawable.logo_voltron)
+            logoBitmap = (drawable as? BitmapDrawable)?.bitmap
+                ?: BitmapFactory.decodeResource(context.resources, R.drawable.logo_voltron)
+        }
+    }
+
+    var gearButtonRect = RectF()
+    var resetButtonRect = RectF()
+    var bmsButtonRect = RectF()
+    var demoMode = false
+
+    private val demoBmsData = JkBmsData(
+        cellVoltages = listOf(3.921f, 3.918f, 3.925f, 3.920f, 3.917f, 3.923f, 3.919f, 3.922f,
+            3.916f, 3.924f, 3.921f, 3.918f, 3.925f, 3.920f, 3.917f, 3.923f, 3.919f),
+        cellCount = 17,
+        totalVoltage = 66.7f,
+        current = -2.5f,
+        power = -166.75f,
+        soc = 85,
+        temp1 = 22.4f,
+        temp2 = 21.8f,
+        mosfetTemp = 25.1f,
+        remainingAh = 102f,
+        nominalAh = 120f,
+        cycles = 12,
+        soh = 98,
+        cellDelta = 0.009f,
+        minCell = 3.916f,
+        maxCell = 3.925f,
+        connected = true
+    )
+
+    fun draw(canvas: Canvas, w: Int, h: Int, data: FarDriverData, bmsData: JkBmsData = JkBmsData()) {
+        val effectiveBms = if (demoMode && !bmsData.connected) demoBmsData else bmsData
         canvas.drawColor(BG_DARK)
 
-        // Advance animation
         glowPhase += 0.05f
         if (glowPhase > Math.PI.toFloat() * 2) glowPhase -= Math.PI.toFloat() * 2
 
-        val pad = 4f
-        val sidebarW = min(100f, w * 0.13f)
-        val bottomH = min(48f, h * 0.12f)
-        val batteryH = min(70f, h * 0.15f)
-        val ampBarH = min(24f, h * 0.06f)
+        val pad = 5f
+        val cr = 10f
+        val wf = w.toFloat()
+        val hf = h.toFloat()
 
-        val mainX = sidebarW + pad
-        val mainW = w - sidebarW - pad * 2
-        val topH = h - bottomH - batteryH - pad * 3
+        // Column widths (proportional)
+        val ampBarW = wf * 0.04f
+        val rangeBarW = ampBarW
+        val sidebarW = wf * 0.10f
+        val gaugeColW = wf * 0.12f  // right column
 
-        // --- Sidebar ---
-        drawSidebar(canvas, pad, pad, sidebarW - pad * 2, h - pad * 2, data)
+        // Row heights — single bottom strip
+        val bottomH = hf * 0.14f
+        val topH = hf - bottomH - pad * 3
 
-        // --- Speed column (left 35%) and gauges column (right 65%) ---
-        val speedColW = mainW * 0.35f
-        val gaugesColW = mainW - speedColW - pad
-        val gaugesX = mainX + speedColW + pad
+        // X positions
+        val sidebarX = ampBarW + pad * 2
+        val mainX = sidebarX + sidebarW + pad
+        val gaugeColX = wf - rangeBarW - pad * 2 - gaugeColW
+        val centerW = gaugeColX - mainX - pad
+        val speedW = centerW * 0.48f
+        val dualW = centerW - speedW - pad
+        val dualX = mainX + speedW + pad
+        val fullRowX = mainX
+        val fullRowW = wf - mainX - rangeBarW - pad * 2
 
-        // Amperage bar
-        drawAmperageBar(canvas, mainX, pad, speedColW, ampBarH, data.current, MAX_AMPS)
+        // === VERTICAL BARS (full height) ===
+        drawVerticalAmperageBar(canvas, pad, pad, ampBarW, hf - pad * 2, data.current, maxAmps)
+        drawVerticalRangeBar(canvas, wf - rangeBarW - pad, pad, rangeBarW, hf - pad * 2, data.rangeKm, data.soc)
 
-        // Big speed
-        drawBigSpeed(canvas, mainX, pad + ampBarH + pad, speedColW, topH - ampBarH - pad, data.speedKmh.toInt())
+        // === SIDEBAR (V / A / W) — full height ===
+        drawSidebar(canvas, sidebarX, pad, sidebarW, hf - pad * 2, data, cr)
 
-        // Temp/usage row (top 32%)
-        val tempRowH = topH * 0.32f
-        val tempGaugeW = gaugesColW / 3f
-        val tempR = min(tempGaugeW, tempRowH) * 0.35f
-        val tempArcW = tempR * 0.14f
+        // === BIG SPEED (left of center) ===
+        val adjustedSpeed = (data.speedKmh * speedFactor).toInt()
+        drawBigSpeed(canvas, mainX, pad, speedW, topH, adjustedSpeed, data.totalKm, data.totalHours, data.kwhUsed, cr)
 
-        drawTempGauge(canvas, gaugesX + tempGaugeW * 0.5f, pad + tempRowH * 0.5f,
-            tempR, data.controllerTemp.toFloat(), 120f, "Ctrl", tempArcW)
-        drawUsageGauge(canvas, gaugesX + tempGaugeW * 1.5f, pad + tempRowH * 0.5f,
-            tempR, data.kwhUsed, 10f, tempArcW)
-        drawTempGauge(canvas, gaugesX + tempGaugeW * 2.5f, pad + tempRowH * 0.5f,
-            tempR, data.motorTemp.toFloat(), 120f, "Motor", tempArcW)
+        // === DUAL RPM+AMP GAUGE (right of center) ===
+        drawDualGauge(canvas, dualX, pad, dualW, topH, data.rpm.toFloat(), data.current, data.rangeKm, cr)
 
-        // RPM gauge
-        val rpmH = topH - tempRowH - pad
-        val rpmCx = gaugesX + gaugesColW / 2f
-        val rpmCy = pad + tempRowH + pad + rpmH / 2f
-        val rpmR = min(gaugesColW, rpmH) * 0.36f
-        val rpmArcW = rpmR * 0.08f
-        drawArcGauge(canvas, rpmCx, rpmCy, rpmR, data.rpm.toFloat(), MAX_RPM, "RPM", 7, rpmArcW)
+        // === RIGHT GAUGE COLUMN (Ctrl° / Mot° / BAT° / kWh bar gauges) ===
+        drawGaugeColumn(canvas, gaugeColX, pad, gaugeColW, topH, data, effectiveBms, cr)
 
-        // --- Battery row ---
-        val battY = topH + pad * 2
-        drawBatteryBar(canvas, mainX, battY, mainW * 0.7f, batteryH, data.soc, data.voltage)
-        drawRangeDisplay(canvas, mainX + mainW * 0.7f + pad, battY, mainW * 0.3f - pad, batteryH, data.rangeKm)
+        // === BOTTOM ROW (battery + gear + trip + BMS + logo) ===
+        val botY = pad + topH + pad
+        drawBottomRow(canvas, fullRowX, botY, fullRowW, bottomH, data, effectiveBms, cr)
 
-        // --- Bottom row ---
-        val botY = h - bottomH - pad
-        val gearW = min(150f, mainW * 0.22f)
-        drawGearIndicator(canvas, mainX, botY, gearW, bottomH, data.gear)
-
-        val odoX = mainX + gearW + pad
-        val odoW = mainW - gearW - pad
-        drawOdometer(canvas, odoX, botY, odoW, bottomH,
-            data.totalKm, data.sessionKm, data.sessionTime, data.totalHours)
+        // === BLE STATUS (small debug text, top-left) ===
+        textPaint.textSize = 10f
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.typeface = Typeface.MONOSPACE
+        val fdCol = if (fdStatus.contains("Live")) ACCENT_GREEN else ACCENT_YELLOW
+        val bmsCol = if (bmsStatus.contains("Live")) ACCENT_GREEN else ACCENT_YELLOW
+        textPaint.color = fdCol
+        canvas.drawText(fdStatus, sidebarX, hf - 4f, textPaint)
+        textPaint.color = bmsCol
+        canvas.drawText(bmsStatus, sidebarX + wf * 0.15f, hf - 4f, textPaint)
     }
 
-    // --- Sidebar ---
-    private fun drawSidebar(canvas: Canvas, x: Float, y: Float, w: Float, h: Float, data: FarDriverData) {
-        val panelH = (h - 20f - 4f * 2) / 3f
-
-        // Brand label
-        textPaint.color = 0xFF6488CC.toInt()
-        textPaint.textSize = min(10f, w * 0.11f)
-        textPaint.textAlign = Paint.Align.CENTER
-        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-        canvas.drawText("VOLTRON.NL", x + w / 2, y + 12f, textPaint)
+    // ============================================================
+    // SIDEBAR — V / A / W cards
+    // ============================================================
+    private fun drawSidebar(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
+                            data: FarDriverData, cr: Float) {
+        val gap = 4f
+        val panelH = (h - gap * 2) / 3f
 
         val vColor = when {
             data.voltage < 60 -> ACCENT_RED
             data.voltage < 62 -> ACCENT_ORANGE
             else -> TEXT_PRI
         }
-        drawValuePanel(canvas, x, y + 18f, w, panelH,
-            formatNumber(data.voltage, 1), "V", vColor)
-        drawValuePanel(canvas, x, y + 18f + panelH + 4f, w, panelH,
-            formatNumber(data.current, 1), "A", TEXT_PRI)
-        drawValuePanel(canvas, x, y + 18f + (panelH + 4f) * 2, w, panelH,
-            data.power.toInt().toString(), "W", TEXT_PRI)
+        drawValueCard(canvas, x, y, w, panelH, formatNumber(data.voltage, 1), "Volts", "\u26A1", vColor, ACCENT_YELLOW, cr)
+        drawValueCard(canvas, x, y + panelH + gap, w, panelH, formatNumber(data.current, 1), "Amps", "\u2301", TEXT_PRI, ACCENT_BLUE, cr)
+        drawValueCard(canvas, x, y + (panelH + gap) * 2, w, panelH, data.power.toInt().toString(), "Watts", "\u2622", TEXT_PRI, ACCENT_ORANGE, cr)
     }
 
-    private fun formatNumber(v: Float, decimals: Int): String {
-        return if (v == v.toInt().toFloat()) v.toInt().toString()
-        else String.format("%.${decimals}f", v)
-    }
-
-    // --- Value Panel ---
-    private fun drawValuePanel(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
-                               value: String, unit: String, vColor: Int) {
-        paint.color = BG_PANEL
+    private fun drawValueCard(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
+                              value: String, label: String, icon: String,
+                              vColor: Int, iconColor: Int, cr: Float) {
+        // Card background with subtle gradient
+        val grad = LinearGradient(x, y, x, y + h,
+            intArrayOf(BG_CARD_LIGHT, BG_CARD), null, Shader.TileMode.CLAMP)
+        cardPaint.shader = grad
         rectF.set(x, y, x + w, y + h)
-        canvas.drawRoundRect(rectF, 6f, 6f, paint)
+        canvas.drawRoundRect(rectF, cr, cr, cardPaint)
+        cardPaint.shader = null
 
+        // Subtle border
+        paint.color = CARD_BORDER
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1f
+        canvas.drawRoundRect(rectF, cr, cr, paint)
+        paint.style = Paint.Style.FILL
+
+        // Icon (top)
+        textPaint.color = iconColor
+        textPaint.textSize = min(30f, h * 0.28f)
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.typeface = Typeface.DEFAULT
+        canvas.drawText(icon, x + w / 2, y + h * 0.24f, textPaint)
+
+        // Value (center, bigger)
         textPaint.color = vColor
-        textPaint.textSize = min(20f, h * 0.35f)
+        textPaint.textSize = min(48f, h * 0.50f)
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-        canvas.drawText(value, x + w / 2, y + h * 0.5f, textPaint)
+        canvas.drawText(value, x + w / 2, y + h * 0.62f, textPaint)
 
+        // Label (bottom)
         textPaint.color = TEXT_DIM
-        textPaint.textSize = min(11f, h * 0.16f)
+        textPaint.textSize = min(16f, h * 0.20f)
         textPaint.typeface = Typeface.MONOSPACE
-        canvas.drawText(unit, x + w / 2, y + h * 0.8f, textPaint)
+        canvas.drawText(label, x + w / 2, y + h * 0.85f, textPaint)
     }
 
-    // --- Big Speed Display ---
-    private fun drawBigSpeed(canvas: Canvas, x: Float, y: Float, w: Float, h: Float, speed: Int) {
-        val fontSize = max(28f, min(w, h) * 0.42f)
+    // ============================================================
+    // BIG SPEED + odometer
+    // ============================================================
+    private fun drawBigSpeed(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
+                             speed: Int, totalKm: Float, totalHours: Float, kwhUsed: Float, cr: Float) {
+        // Card background
+        val grad = LinearGradient(x, y, x, y + h,
+            intArrayOf(BG_CARD_LIGHT, BG_CARD), null, Shader.TileMode.CLAMP)
+        cardPaint.shader = grad
+        rectF.set(x, y, x + w, y + h)
+        canvas.drawRoundRect(rectF, cr, cr, cardPaint)
+        cardPaint.shader = null
 
+        paint.color = CARD_BORDER
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1f
+        canvas.drawRoundRect(rectF, cr, cr, paint)
+        paint.style = Paint.Style.FILL
+
+        // Speed digits
+        val fontSize = max(36f, min(w * 0.45f, h * 0.48f))
         textPaint.color = TEXT_PRI
         textPaint.textSize = fontSize
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-        canvas.drawText(speed.toString(), x + w / 2, y + h * 0.5f, textPaint)
+        canvas.drawText(speed.toString(), x + w / 2, y + h * 0.48f, textPaint)
 
+        // km/h label
         textPaint.color = TEXT_DIM
-        textPaint.textSize = max(10f, fontSize * 0.2f)
+        textPaint.textSize = max(11f, fontSize * 0.18f)
         textPaint.typeface = Typeface.MONOSPACE
-        canvas.drawText("km/h", x + w / 2, y + h * 0.5f + fontSize * 0.45f, textPaint)
+        canvas.drawText("km/h", x + w / 2, y + h * 0.48f + fontSize * 0.38f, textPaint)
+
+        // Odometer line
+        val odoSize = max(9f, fontSize * 0.13f)
+        textPaint.color = 0xFF4A6A9E.toInt()
+        textPaint.textSize = odoSize
+        textPaint.typeface = Typeface.MONOSPACE
+        val odoStr = String.format("%.1f km  %.1f h  %.2f kWh", totalKm, totalHours, kwhUsed)
+        canvas.drawText(odoStr, x + w / 2, y + h * 0.88f, textPaint)
     }
 
-    // --- Amperage Bar ---
-    private fun drawAmperageBar(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
-                                amps: Float, maxAmps: Float) {
-        val r = h / 2f
+    // ============================================================
+    // DUAL GAUGE — RPM (outer) + Amperage (inner)
+    // ============================================================
+    private fun drawDualGauge(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
+                              rpm: Float, amps: Float, rangeKm: Int, cr: Float) {
+        // Card
+        val grad = LinearGradient(x, y, x, y + h,
+            intArrayOf(BG_CARD_LIGHT, BG_CARD), null, Shader.TileMode.CLAMP)
+        cardPaint.shader = grad
+        rectF.set(x, y, x + w, y + h)
+        canvas.drawRoundRect(rectF, cr, cr, cardPaint)
+        cardPaint.shader = null
 
-        // Track background
+        paint.color = CARD_BORDER
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1f
+        canvas.drawRoundRect(rectF, cr, cr, paint)
+        paint.style = Paint.Style.FILL
+
+        // RPM label (above gauge)
+        textPaint.color = TEXT_DIM
+        textPaint.textSize = max(10f, h * 0.06f)
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        val labelH = textPaint.textSize + 6f
+        canvas.drawText("RPM", x + w / 2, y + labelH - 2f, textPaint)
+
+        val cx = x + w / 2
+        val cy = y + labelH + (h - labelH) * 0.46f
+        val outerR = min(w, h - labelH) * 0.32f
+        val startAngle = 135f
+        val sweepAngle = 270f
+
+        // --- Outer arc: RPM ---
+        val outerArcW = outerR * 0.10f
+        val rpmRatio = min(rpm / maxRpm, 1f)
+        val rpmCol = when {
+            rpmRatio < 0.6f -> ACCENT_GREEN
+            rpmRatio < 0.8f -> ACCENT_YELLOW
+            else -> ACCENT_RED
+        }
+
+        paint.color = GAUGE_BG
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = outerArcW
+        paint.strokeCap = Paint.Cap.ROUND
+        rectF.set(cx - outerR, cy - outerR, cx + outerR, cy + outerR)
+        canvas.drawArc(rectF, startAngle, sweepAngle, false, paint)
+        if (rpmRatio > 0) {
+            paint.color = rpmCol
+            canvas.drawArc(rectF, startAngle, sweepAngle * rpmRatio, false, paint)
+        }
+
+        // --- Inner arc: Amperage (visual only) ---
+        val innerR = outerR * 0.72f
+        val innerArcW = outerR * 0.10f
+        val ampRatio = min(abs(amps) / maxAmps, 1f)
+        val ampCol = ampColorInt(amps, maxAmps)
+
+        paint.color = GAUGE_BG
+        paint.strokeWidth = innerArcW
+        rectF.set(cx - innerR, cy - innerR, cx + innerR, cy + innerR)
+        canvas.drawArc(rectF, startAngle, sweepAngle, false, paint)
+        if (ampRatio > 0) {
+            paint.color = ampCol
+            canvas.drawArc(rectF, startAngle, sweepAngle * ampRatio, false, paint)
+        }
+        paint.style = Paint.Style.FILL
+
+        // --- Needle (follows RPM) ---
+        val needleAngle = Math.toRadians((startAngle + sweepAngle * rpmRatio).toDouble())
+        val needleLen = outerR * 0.60f
+        val nx = cx + needleLen * cos(needleAngle).toFloat()
+        val ny = cy + needleLen * sin(needleAngle).toFloat()
+        paint.color = NEEDLE_COLOR
+        paint.strokeWidth = max(2f, outerR * 0.03f)
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.style = Paint.Style.STROKE
+        canvas.drawLine(cx, cy, nx, ny, paint)
+        paint.style = Paint.Style.FILL
+        canvas.drawCircle(cx, cy, outerR * 0.05f, paint)
+
+        // --- RPM value (center of gauge) ---
+        textPaint.color = TEXT_PRI
+        textPaint.textSize = max(14f, outerR * 0.34f)
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        canvas.drawText(rpm.toInt().toString(), cx, cy + textPaint.textSize * 0.35f, textPaint)
+
+        // --- Tick labels (RPM outer) ---
+        textPaint.color = TEXT_DIM
+        textPaint.textSize = max(6f, outerR * 0.10f)
+        textPaint.typeface = Typeface.MONOSPACE
+        for (i in 0..5) {
+            val frac = i.toFloat() / 5f
+            val a = Math.toRadians((startAngle + sweepAngle * frac).toDouble())
+            val lx = cx + (outerR + outerArcW * 2.2f) * cos(a).toFloat()
+            val ly = cy + (outerR + outerArcW * 2.2f) * sin(a).toFloat()
+            canvas.drawText((maxRpm * frac).toInt().toString(), lx, ly + textPaint.textSize * 0.35f, textPaint)
+        }
+
+        // --- Range km (bottom of card, same line as odometer in speed card) ---
+        val rangeStr = if (rangeKm > 0) "~${rangeKm}" else "---"
+        val rangeCol = when {
+            rangeKm <= 0 -> TEXT_DIM
+            rangeKm < 15 -> ACCENT_RED
+            rangeKm < 30 -> ACCENT_ORANGE
+            else -> ACCENT_GREEN
+        }
+        textPaint.color = rangeCol
+        textPaint.textSize = max(11f, outerR * 0.22f)
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        canvas.drawText(rangeStr, cx, y + h * 0.85f, textPaint)
+
+        textPaint.color = TEXT_DIM
+        textPaint.textSize = max(7f, outerR * 0.13f)
+        textPaint.typeface = Typeface.MONOSPACE
+        canvas.drawText("km remain", cx, y + h * 0.94f, textPaint)
+    }
+
+    // ============================================================
+    // RIGHT GAUGE COLUMN — Ctrl° / Mot° / kWh as ring/donut gauges
+    // ============================================================
+    private fun drawGaugeColumn(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
+                                data: FarDriverData, bmsData: JkBmsData, cr: Float) {
+        // Card background
+        val grad = LinearGradient(x, y, x, y + h,
+            intArrayOf(BG_CARD_LIGHT, BG_CARD), null, Shader.TileMode.CLAMP)
+        cardPaint.shader = grad
+        rectF.set(x, y, x + w, y + h)
+        canvas.drawRoundRect(rectF, cr, cr, cardPaint)
+        cardPaint.shader = null
+
+        paint.color = CARD_BORDER
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1f
+        canvas.drawRoundRect(rectF, cr, cr, paint)
+        paint.style = Paint.Style.FILL
+
+        val innerPad = 6f
+        val gap = 4f
+
+        // Time & date at top
+        val now = Calendar.getInstance()
+        val timeStr = SimpleDateFormat("HH:mm", Locale.getDefault()).format(now.time)
+        val dateStr = SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(now.time)
+
+        val timeSize = max(12f, w * 0.18f)
+        val dateSize = max(6f, w * 0.09f)
+        val clockH = timeSize + dateSize + 8f
+
+        textPaint.color = TEXT_PRI
+        textPaint.textSize = timeSize
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        canvas.drawText(timeStr, x + w / 2, y + innerPad + timeSize, textPaint)
+
+        textPaint.color = TEXT_DIM
+        textPaint.textSize = dateSize
+        textPaint.typeface = Typeface.MONOSPACE
+        canvas.drawText(dateStr, x + w / 2, y + innerPad + timeSize + dateSize + 4f, textPaint)
+
+        // Gauges below time
+        val gaugeY = y + innerPad + clockH + 4f
+        val gaugeH = h - innerPad * 2 - clockH - 4f
+        val slotCount = if (bmsData.connected) 4 else 3
+        val slotH = (gaugeH - gap * (slotCount - 1)) / slotCount
+
+        var slotIdx = 0
+
+        // ECU temp
+        drawRingGauge(canvas, x, gaugeY + slotIdx * (slotH + gap), w, slotH,
+            "ECU", "${data.controllerTemp}\u00b0", data.controllerTemp / 120f,
+            tempColorInt(data.controllerTemp))
+        slotIdx++
+
+        // Motor temp
+        drawRingGauge(canvas, x, gaugeY + slotIdx * (slotH + gap), w, slotH,
+            "MOT", "${data.motorTemp}\u00b0", data.motorTemp / 120f,
+            tempColorInt(data.motorTemp))
+        slotIdx++
+
+        // BAT temp (only when BMS connected)
+        if (bmsData.connected) {
+            val avgBatTemp = ((bmsData.temp1 + bmsData.temp2) / 2f)
+            drawRingGauge(canvas, x, gaugeY + slotIdx * (slotH + gap), w, slotH,
+                "BAT", "${avgBatTemp.toInt()}\u00b0", avgBatTemp / 60f,
+                tempColorInt(avgBatTemp.toInt()))
+            slotIdx++
+        }
+
+        // kWh dual gauge — outer: remaining, inner: used
+        drawDualKwhGauge(canvas, x, gaugeY + slotIdx * (slotH + gap), w, slotH,
+            data.soc, data.kwhUsed)
+    }
+
+    // Dual ring kWh gauge — outer=remaining, inner=used
+    private fun drawDualKwhGauge(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
+                                  soc: Int, kwhUsed: Float) {
+        val labelSpace = max(10f, h * 0.18f)
+        val ringArea = h - labelSpace
+        val outerR = min(w * 0.28f, ringArea * 0.38f)
+        val outerW = max(3f, outerR * 0.16f)
+        val innerR = outerR * 0.68f
+        val innerW = max(2f, outerR * 0.14f)
+        val cx = x + w / 2
+        val cy = y + ringArea * 0.50f
+        val startAngle = 135f
+        val sweepAngle = 270f
+
+        val remainKwh = soc / 100f * BATTERY_TOTAL_KWH
+        val remainRatio = (soc / 100f).coerceIn(0f, 1f)
+        val usedRatio = (kwhUsed / BATTERY_TOTAL_KWH).coerceIn(0f, 1f)
+        val glow = 0.7f + 0.3f * sin(glowPhase)
+
+        // --- Outer ring: remaining kWh ---
+        paint.color = GAUGE_BG
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = outerW
+        paint.strokeCap = Paint.Cap.ROUND
+        rectF.set(cx - outerR, cy - outerR, cx + outerR, cy + outerR)
+        canvas.drawArc(rectF, startAngle, sweepAngle, false, paint)
+
+        if (remainRatio > 0) {
+            paint.color = adjustAlpha(ACCENT_BLUE, glow)
+            canvas.drawArc(rectF, startAngle, sweepAngle * remainRatio, false, paint)
+        }
+
+        // --- Inner ring: used kWh ---
+        paint.color = GAUGE_BG
+        paint.strokeWidth = innerW
+        rectF.set(cx - innerR, cy - innerR, cx + innerR, cy + innerR)
+        canvas.drawArc(rectF, startAngle, sweepAngle, false, paint)
+
+        if (usedRatio > 0) {
+            val usedCol = when {
+                usedRatio < 0.5f -> ACCENT_GREEN
+                usedRatio < 0.75f -> ACCENT_YELLOW
+                else -> ACCENT_ORANGE
+            }
+            paint.color = adjustAlpha(usedCol, glow)
+            canvas.drawArc(rectF, startAngle, sweepAngle * usedRatio, false, paint)
+        }
+        paint.style = Paint.Style.FILL
+
+        // Remaining value (center)
+        textPaint.color = ACCENT_BLUE
+        textPaint.textSize = max(7f, outerR * 0.40f)
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        canvas.drawText(String.format("%.1f", remainKwh), cx, cy - outerR * 0.04f, textPaint)
+
+        // Used value (below remaining)
+        val usedCol = when {
+            usedRatio < 0.5f -> ACCENT_GREEN
+            usedRatio < 0.75f -> ACCENT_YELLOW
+            else -> ACCENT_ORANGE
+        }
+        textPaint.color = usedCol
+        textPaint.textSize = max(5f, outerR * 0.26f)
+        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        val usedStr = if (kwhUsed < 10) String.format("-%.1f", kwhUsed) else String.format("-%.0f", kwhUsed)
+        canvas.drawText(usedStr, cx, cy + outerR * 0.28f, textPaint)
+
+        // Label (just below rings)
+        textPaint.color = TEXT_DIM
+        textPaint.textSize = max(6f, min(labelSpace * 0.65f, outerR * 0.24f))
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.typeface = Typeface.MONOSPACE
+        canvas.drawText("kWh", cx, cy + outerR + outerW + textPaint.textSize + 4f, textPaint)
+    }
+
+    // Ring/donut gauge — centered, label below
+    private fun drawRingGauge(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
+                              label: String, valueStr: String, ratio: Float, color: Int) {
+        val clamped = ratio.coerceIn(0f, 1f)
+        val labelSpace = max(10f, h * 0.18f)
+        val ringArea = h - labelSpace
+        val ringR = min(w * 0.28f, ringArea * 0.38f)
+        val ringW = max(3f, ringR * 0.20f)
+        val cx = x + w / 2
+        val cy = y + ringArea * 0.50f
+        val startAngle = 135f
+        val sweepAngle = 270f
+
+        // Background arc
+        paint.color = GAUGE_BG
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = ringW
+        paint.strokeCap = Paint.Cap.ROUND
+        rectF.set(cx - ringR, cy - ringR, cx + ringR, cy + ringR)
+        canvas.drawArc(rectF, startAngle, sweepAngle, false, paint)
+
+        // Value arc with glow
+        if (clamped > 0) {
+            val glow = 0.7f + 0.3f * sin(glowPhase)
+            paint.color = adjustAlpha(color, glow)
+            canvas.drawArc(rectF, startAngle, sweepAngle * clamped, false, paint)
+        }
+        paint.style = Paint.Style.FILL
+
+        // Value text (inside ring)
+        textPaint.color = color
+        textPaint.textSize = max(7f, ringR * 0.48f)
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        canvas.drawText(valueStr, cx, cy + textPaint.textSize * 0.35f, textPaint)
+
+        // Label (just below ring)
+        textPaint.color = TEXT_DIM
+        textPaint.textSize = max(6f, min(labelSpace * 0.65f, ringR * 0.28f))
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.typeface = Typeface.MONOSPACE
+        canvas.drawText(label, cx, cy + ringR + ringW + textPaint.textSize + 4f, textPaint)
+    }
+
+    // ============================================================
+    // BOTTOM ROW — single strip: Gear | Battery+SOC | Trip/Session | Logo | Settings
+    // ============================================================
+    private fun drawBottomRow(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
+                              data: FarDriverData, bmsData: JkBmsData, cr: Float) {
+        // Full row card background
+        val grad = LinearGradient(x, y, x, y + h,
+            intArrayOf(BG_CARD_LIGHT, BG_CARD), null, Shader.TileMode.CLAMP)
+        cardPaint.shader = grad
+        rectF.set(x, y, x + w, y + h)
+        canvas.drawRoundRect(rectF, cr, cr, cardPaint)
+        cardPaint.shader = null
+
+        paint.color = CARD_BORDER
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1f
+        canvas.drawRoundRect(rectF, cr, cr, paint)
+        paint.style = Paint.Style.FILL
+
+        val innerPad = 6f
+        val gap = 6f
+        val col = socColorInt(data.soc)
+
+        // --- Gear indicator (left) ---
+        val gearW = w * 0.12f
+        drawGearIndicator(canvas, x + innerPad, y + 2f, gearW, h - 4f, data.gear, cr)
+
+        // --- Settings button (right end) ---
+        val settingsW = h - 4f
+        val settingsX = x + w - settingsW - innerPad
+        drawSettingsButton(canvas, settingsX, y + 2f, settingsW, h - 4f, cr)
+        gearButtonRect.set(settingsX, y + 2f, settingsX + settingsW, y + h - 2f)
+
+        // --- Logo (left of settings) ---
+        var contentEndX = settingsX - gap
+        logoBitmap?.let { bmp ->
+            val logoH = h * 0.65f
+            val logoW = logoH * bmp.width / bmp.height
+            val logoX = settingsX - gap - logoW
+            val logoY = y + (h - logoH) / 2
+            rectF.set(logoX, logoY, logoX + logoW, logoY + logoH)
+            canvas.drawBitmap(bmp, null, rectF, paint)
+            contentEndX = logoX - gap
+        }
+
+        // --- Battery icon + SOC% (longer, after gear) ---
+        val battSectionX = x + innerPad + gearW + gap
+        val battIconW = w * 0.34f
+        val battH = h - 8f
+        val battY = y + (h - battH) / 2
+        val tipW = 7f
+        val tipH = min(20f, battH * 0.50f)
+        val border = 2f
+        val bcr = 4f
+
+        // Battery outline
+        paint.color = col
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = border
+        rectF.set(battSectionX, battY, battSectionX + battIconW, battY + battH)
+        canvas.drawRoundRect(rectF, bcr, bcr, paint)
+        paint.style = Paint.Style.FILL
+
+        // Tip
+        val tipX2 = battSectionX + battIconW + 1f
+        val tipY2 = battY + (battH - tipH) / 2
+        paint.color = col
+        rectF.set(tipX2, tipY2, tipX2 + tipW, tipY2 + tipH)
+        canvas.drawRoundRect(rectF, 2f, 2f, paint)
+
+        // Fill inside
+        val inset = border + 2f
+        val fillMaxW = battIconW - inset * 2
+        val fillW = fillMaxW * data.soc / 100f
+        if (fillW > 0) {
+            val fillGrad = LinearGradient(battSectionX + inset, battY + inset,
+                battSectionX + inset, battY + battH - inset,
+                intArrayOf(adjustAlpha(col, 0.95f), adjustAlpha(col, 0.60f), adjustAlpha(col, 0.95f)),
+                floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP)
+            paint.shader = fillGrad
+            rectF.set(battSectionX + inset, battY + inset,
+                battSectionX + inset + fillW, battY + battH - inset)
+            canvas.drawRoundRect(rectF, 2f, 2f, paint)
+            paint.shader = null
+        }
+
+        // SOC %
+        val socX = battSectionX + battIconW + tipW + 6f
+        textPaint.color = col
+        textPaint.textSize = min(20f, h * 0.42f)
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        canvas.drawText("${data.soc}%", socX, y + h / 2 + textPaint.textSize * 0.35f, textPaint)
+
+        // Battery area = BMS tap target
+        val socTextW = textPaint.measureText("${data.soc}%")
+        bmsButtonRect.set(battSectionX, y, socX + socTextW, y + h)
+
+        // --- Trip / Session + Reset (center area) ---
+        val tripX = socX + socTextW + gap * 2
+        val availW = contentEndX - tripX
+        val tripW = availW * 0.42f
+        val sessionW = availW * 0.42f
+        val hrs = data.sessionTime / 3600
+        val mins = (data.sessionTime % 3600) / 60
+
+        val labelSize = min(12f, h * 0.28f)
+        val valueSize = min(20f, h * 0.46f)
+
+        // Trip
+        textPaint.color = TEXT_DIM
+        textPaint.textSize = labelSize
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.typeface = Typeface.MONOSPACE
+        canvas.drawText("TRIP", tripX, y + h * 0.36f, textPaint)
+
+        textPaint.color = ACCENT_BLUE
+        textPaint.textSize = valueSize
+        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        canvas.drawText(String.format("%.1f km", data.sessionKm), tripX, y + h * 0.76f, textPaint)
+
+        // Session
+        val sessionX = tripX + tripW
+        textPaint.color = TEXT_DIM
+        textPaint.textSize = labelSize
+        textPaint.typeface = Typeface.MONOSPACE
+        canvas.drawText("SESSION", sessionX, y + h * 0.36f, textPaint)
+
+        textPaint.color = ACCENT_BLUE
+        textPaint.textSize = valueSize
+        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        canvas.drawText("$hrs:${mins.toString().padStart(2, '0')}", sessionX, y + h * 0.76f, textPaint)
+
+        // Reset button (small, right of session)
+        val resetBtnSize = h * 0.30f
+        val resetBtnX = sessionX + sessionW
+        val resetBtnY = y + (h - resetBtnSize) / 2
+        drawResetButton(canvas, resetBtnX, resetBtnY, resetBtnSize, resetBtnSize, 4f)
+        resetButtonRect.set(resetBtnX, resetBtnY, resetBtnX + resetBtnSize, resetBtnY + resetBtnSize)
+    }
+
+    // ============================================================
+    // VERTICAL AMPERAGE BAR
+    // ============================================================
+    private fun drawVerticalAmperageBar(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
+                                        amps: Float, maxAmps: Float) {
+        val r = w / 2f
+
+        // Track
         paint.color = GAUGE_BG
         rectF.set(x, y, x + w, y + h)
         canvas.drawRoundRect(rectF, r, r, paint)
 
         // Fill
         val ratio = min(abs(amps) / maxAmps, 1f)
-        val fillW = max(w * ratio, w * 0.02f)
+        val fillH = max(h * ratio, h * 0.02f)
         val col = ampColorInt(amps, maxAmps)
         val glow = 0.7f + 0.3f * sin(glowPhase)
 
-        // Gradient fill
-        val shader = LinearGradient(x, y, x + fillW, y,
-            intArrayOf(adjustAlpha(col, (0.6f * glow)), adjustAlpha(col, glow), col),
-            floatArrayOf(0f, 0.7f, 1f), Shader.TileMode.CLAMP)
+        val fillTop = y + h - fillH
+        val shader = LinearGradient(x, fillTop, x, y + h,
+            intArrayOf(col, adjustAlpha(col, glow), adjustAlpha(col, 0.5f * glow)),
+            floatArrayOf(0f, 0.3f, 1f), Shader.TileMode.CLAMP)
         paint.shader = shader
-        rectF.set(x, y, x + fillW, y + h)
+        rectF.set(x, fillTop, x + w, y + h)
         canvas.drawRoundRect(rectF, r, r, paint)
         paint.shader = null
 
-        // Glow halo
+        // Glow
         if (ratio > 0.03f) {
-            val edgeX = x + fillW
-            val glowR = h * 0.8f
-            val radialGrad = RadialGradient(edgeX, y + h / 2, glowR,
-                adjustAlpha(col, (0.4f * glow)), Color.TRANSPARENT, Shader.TileMode.CLAMP)
+            val glowR = w * 1.0f
+            val radialGrad = RadialGradient(x + w / 2, fillTop, glowR,
+                adjustAlpha(col, 0.5f * glow), Color.TRANSPARENT, Shader.TileMode.CLAMP)
             paint.shader = radialGrad
-            canvas.drawCircle(edgeX, y + h / 2, glowR, paint)
+            canvas.drawCircle(x + w / 2, fillTop, glowR, paint)
             paint.shader = null
         }
+
+        // Label
+        textPaint.color = TEXT_DIM
+        textPaint.textSize = max(8f, w * 0.28f)
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        canvas.drawText("${abs(amps).toInt()}A", x + w / 2, y + 16f, textPaint)
     }
 
-    // --- Arc Gauge (RPM) ---
+    // ============================================================
+    // VERTICAL RANGE BAR
+    // ============================================================
+    private fun drawVerticalRangeBar(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
+                                     rangeKm: Int, soc: Int) {
+        val r = w / 2f
+
+        paint.color = GAUGE_BG
+        rectF.set(x, y, x + w, y + h)
+        canvas.drawRoundRect(rectF, r, r, paint)
+
+        val ratio = (soc / 100f).coerceIn(0f, 1f)
+        val fillH = max(h * ratio, h * 0.02f)
+        val col = socColorInt(soc)
+        val glow = 0.7f + 0.3f * sin(glowPhase)
+
+        val fillTop = y + h - fillH
+        val shader = LinearGradient(x, fillTop, x, y + h,
+            intArrayOf(col, adjustAlpha(col, glow), adjustAlpha(col, 0.5f * glow)),
+            floatArrayOf(0f, 0.3f, 1f), Shader.TileMode.CLAMP)
+        paint.shader = shader
+        rectF.set(x, fillTop, x + w, y + h)
+        canvas.drawRoundRect(rectF, r, r, paint)
+        paint.shader = null
+
+        if (ratio > 0.03f) {
+            val glowR = w * 1.0f
+            val radialGrad = RadialGradient(x + w / 2, fillTop, glowR,
+                adjustAlpha(col, 0.5f * glow), Color.TRANSPARENT, Shader.TileMode.CLAMP)
+            paint.shader = radialGrad
+            canvas.drawCircle(x + w / 2, fillTop, glowR, paint)
+            paint.shader = null
+        }
+
+        textPaint.color = TEXT_DIM
+        textPaint.textSize = max(8f, w * 0.26f)
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        val rangeStr = if (rangeKm > 0) "~$rangeKm" else "---"
+        canvas.drawText(rangeStr, x + w / 2, y + 14f, textPaint)
+        textPaint.textSize = max(7f, w * 0.2f)
+        canvas.drawText("km", x + w / 2, y + 26f, textPaint)
+    }
+
+    // ============================================================
+    // ARC GAUGE (RPM)
+    // ============================================================
     private fun drawArcGauge(canvas: Canvas, cx: Float, cy: Float, radius: Float,
                              value: Float, maxVal: Float, unit: String, numTicks: Int, arcWidth: Float) {
-        val startAngle = 135f // canvas degrees (0=right, clockwise)
+        val startAngle = 135f
         val sweepAngle = 270f
         val ratio = min(value / maxVal, 1f)
 
-        // Background circle
-        paint.color = BG_PANEL
-        canvas.drawCircle(cx, cy, radius + arcWidth, paint)
-
-        // Arc background
+        // Arc track
         paint.color = GAUGE_BG
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = arcWidth
@@ -225,7 +814,7 @@ object DashboardRenderer {
         rectF.set(cx - radius, cy - radius, cx + radius, cy + radius)
         canvas.drawArc(rectF, startAngle, sweepAngle, false, paint)
 
-        // Value arc
+        // Value arc with glow
         val arcCol = when {
             ratio < 0.6f -> ACCENT_GREEN
             ratio < 0.8f -> ACCENT_YELLOW
@@ -244,7 +833,7 @@ object DashboardRenderer {
         val ny = cy + needleLen * sin(needleAngle).toFloat()
 
         paint.color = NEEDLE_COLOR
-        paint.strokeWidth = max(2f, radius * 0.03f)
+        paint.strokeWidth = max(2f, radius * 0.04f)
         paint.strokeCap = Paint.Cap.ROUND
         paint.style = Paint.Style.STROKE
         canvas.drawLine(cx, cy, nx, ny, paint)
@@ -252,34 +841,36 @@ object DashboardRenderer {
 
         // Center dot
         paint.color = NEEDLE_COLOR
-        canvas.drawCircle(cx, cy, radius * 0.06f, paint)
+        canvas.drawCircle(cx, cy, radius * 0.07f, paint)
 
-        // Value text
+        // Value
         textPaint.color = TEXT_PRI
-        textPaint.textSize = max(12f, radius * 0.35f)
+        textPaint.textSize = max(14f, radius * 0.40f)
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
         canvas.drawText(value.toInt().toString(), cx, cy + textPaint.textSize * 0.35f, textPaint)
 
-        // Unit label
+        // Unit
         textPaint.color = TEXT_DIM
-        textPaint.textSize = max(8f, radius * 0.15f)
+        textPaint.textSize = max(8f, radius * 0.18f)
         textPaint.typeface = Typeface.MONOSPACE
-        canvas.drawText(unit, cx, cy + radius * 0.35f + textPaint.textSize, textPaint)
+        canvas.drawText(unit, cx, cy + radius * 0.38f + textPaint.textSize, textPaint)
 
         // Tick labels
         textPaint.color = TEXT_DIM
-        textPaint.textSize = max(7f, radius * 0.1f)
+        textPaint.textSize = max(6f, radius * 0.12f)
         for (i in 0 until numTicks) {
             val frac = i.toFloat() / (numTicks - 1)
             val a = Math.toRadians((startAngle + sweepAngle * frac).toDouble())
-            val lx = cx + (radius + arcWidth * 2.5f) * cos(a).toFloat()
-            val ly = cy + (radius + arcWidth * 2.5f) * sin(a).toFloat()
+            val lx = cx + (radius + arcWidth * 2.2f) * cos(a).toFloat()
+            val ly = cy + (radius + arcWidth * 2.2f) * sin(a).toFloat()
             canvas.drawText((maxVal * frac).toInt().toString(), lx, ly + textPaint.textSize * 0.35f, textPaint)
         }
     }
 
-    // --- Temp Gauge ---
+    // ============================================================
+    // TEMP GAUGE (small arc)
+    // ============================================================
     private fun drawTempGauge(canvas: Canvas, cx: Float, cy: Float, radius: Float,
                               temp: Float, maxTemp: Float, label: String, arcWidth: Float) {
         val startAngle = 135f
@@ -287,7 +878,6 @@ object DashboardRenderer {
         val ratio = min(max(temp, 0f) / maxTemp, 1f)
         val col = tempColorInt(temp.toInt())
 
-        // Arc background
         paint.color = GAUGE_BG
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = arcWidth
@@ -295,30 +885,29 @@ object DashboardRenderer {
         rectF.set(cx - radius, cy - radius, cx + radius, cy + radius)
         canvas.drawArc(rectF, startAngle, sweepAngle, false, paint)
 
-        // Value arc
         if (ratio > 0) {
             paint.color = col
             canvas.drawArc(rectF, startAngle, sweepAngle * ratio, false, paint)
         }
         paint.style = Paint.Style.FILL
 
-        // Temp value
         textPaint.color = col
-        textPaint.textSize = max(10f, radius * 0.5f)
+        textPaint.textSize = max(9f, radius * 0.55f)
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-        canvas.drawText("${temp.toInt()}\u00b0", cx, cy + textPaint.textSize * 0.35f, textPaint)
+        canvas.drawText("${temp.toInt()}\u00b0", cx, cy + textPaint.textSize * 0.3f, textPaint)
 
-        // Label
         textPaint.color = TEXT_DIM
-        textPaint.textSize = max(7f, radius * 0.25f)
+        textPaint.textSize = max(6f, radius * 0.28f)
         textPaint.typeface = Typeface.MONOSPACE
-        canvas.drawText(label, cx, cy + radius * 0.55f, textPaint)
+        canvas.drawText(label, cx, cy + radius * 0.6f, textPaint)
     }
 
-    // --- Usage Gauge ---
+    // ============================================================
+    // USAGE GAUGE (kWh used + remaining)
+    // ============================================================
     private fun drawUsageGauge(canvas: Canvas, cx: Float, cy: Float, radius: Float,
-                               kwh: Float, maxKwh: Float, arcWidth: Float) {
+                               kwh: Float, maxKwh: Float, soc: Int, arcWidth: Float) {
         val startAngle = 135f
         val sweepAngle = 270f
         val ratio = min(kwh / maxKwh, 1f)
@@ -329,7 +918,6 @@ object DashboardRenderer {
             else -> ACCENT_ORANGE
         }
 
-        // Arc background
         paint.color = GAUGE_BG
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = arcWidth
@@ -337,156 +925,238 @@ object DashboardRenderer {
         rectF.set(cx - radius, cy - radius, cx + radius, cy + radius)
         canvas.drawArc(rectF, startAngle, sweepAngle, false, paint)
 
-        // Value arc
         if (ratio > 0) {
             paint.color = col
             canvas.drawArc(rectF, startAngle, sweepAngle * ratio, false, paint)
         }
         paint.style = Paint.Style.FILL
 
-        // Value
-        textPaint.color = col
-        textPaint.textSize = max(10f, radius * 0.45f)
-        textPaint.textAlign = Paint.Align.CENTER
-        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-        val kwhStr = if (kwh < 10) String.format("%.2f", kwh) else String.format("%.1f", kwh)
-        canvas.drawText(kwhStr, cx, cy + textPaint.textSize * 0.35f, textPaint)
-
-        // Label
-        textPaint.color = TEXT_DIM
-        textPaint.textSize = max(7f, radius * 0.25f)
-        textPaint.typeface = Typeface.MONOSPACE
-        canvas.drawText("kWh", cx, cy + radius * 0.55f, textPaint)
-    }
-
-    // --- Battery Bar ---
-    private fun drawBatteryBar(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
-                               soc: Int, voltage: Float) {
-        val col = socColorInt(soc)
-        val battW = w * 0.65f
-        val battH = min(50f, h - 8f)
-        val battY = y + (h - battH) / 2
-        val tipW = 8f
-        val tipH = min(22f, battH * 0.5f)
-        val border = 2.5f
-        val cr = 4f
-
-        // Battery outline
-        paint.color = col
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = border
-        rectF.set(x, battY, x + battW, battY + battH)
-        canvas.drawRoundRect(rectF, cr, cr, paint)
-        paint.style = Paint.Style.FILL
-
-        // Tip
-        val tipX = x + battW + 1f
-        val tipY2 = battY + (battH - tipH) / 2
-        paint.color = col
-        rectF.set(tipX, tipY2, tipX + tipW, tipY2 + tipH)
-        canvas.drawRoundRect(rectF, 2f, 2f, paint)
-
-        // Fill inside
-        val inset = border + 2f
-        val fillMaxW = battW - inset * 2
-        val fillW = fillMaxW * soc / 100f
-        if (fillW > 0) {
-            val shader = LinearGradient(x + inset, battY + inset, x + inset, battY + battH - inset,
-                intArrayOf(col, adjustAlpha(col, 0.78f), col),
-                floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP)
-            paint.shader = shader
-            rectF.set(x + inset, battY + inset, x + inset + fillW, battY + battH - inset)
-            canvas.drawRoundRect(rectF, 2f, 2f, paint)
-            paint.shader = null
-        }
-
-        // SOC text
-        val textX = x + battW + tipW + 10f
-        val remainKwh = String.format("%.1f", soc / 100f * BATTERY_TOTAL_KWH)
-
-        textPaint.color = col
-        textPaint.textSize = min(18f, h * 0.35f)
-        textPaint.textAlign = Paint.Align.LEFT
-        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-        canvas.drawText("$soc%", textX, battY + battH * 0.35f, textPaint)
-
+        // Remaining kWh
+        val remainKwh = soc / 100f * BATTERY_TOTAL_KWH
         textPaint.color = ACCENT_BLUE
-        textPaint.textSize = min(13f, h * 0.22f)
-        textPaint.typeface = Typeface.MONOSPACE
-        canvas.drawText("${remainKwh}kWh", textX + 48f, battY + battH * 0.35f, textPaint)
-
-        // Voltage
-        textPaint.color = TEXT_DIM
-        textPaint.textSize = min(13f, h * 0.22f)
-        canvas.drawText(String.format("%.1fV", voltage), textX, battY + battH * 0.72f, textPaint)
-    }
-
-    // --- Range Display ---
-    private fun drawRangeDisplay(canvas: Canvas, x: Float, y: Float, w: Float, h: Float, rangeKm: Int) {
+        textPaint.textSize = max(8f, radius * 0.42f)
         textPaint.textAlign = Paint.Align.CENTER
-        textPaint.textSize = min(22f, h * 0.45f)
         textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-        if (rangeKm > 0) {
-            textPaint.color = ACCENT_BLUE
-            canvas.drawText("~$rangeKm km", x + w / 2, y + h / 2 + textPaint.textSize * 0.35f, textPaint)
-        } else {
-            textPaint.color = TEXT_DIM
-            canvas.drawText("--- km", x + w / 2, y + h / 2 + textPaint.textSize * 0.35f, textPaint)
-        }
+        canvas.drawText(String.format("%.1f", remainKwh), cx, cy - radius * 0.02f, textPaint)
+
+        textPaint.color = TEXT_DIM
+        textPaint.textSize = max(6f, radius * 0.22f)
+        textPaint.typeface = Typeface.MONOSPACE
+        canvas.drawText("kWh", cx, cy + radius * 0.22f, textPaint)
+
+        // Used
+        textPaint.color = col
+        textPaint.textSize = max(6f, radius * 0.28f)
+        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        val usedStr = if (kwh < 10) String.format("-%.1f", kwh) else String.format("-%.0f", kwh)
+        canvas.drawText(usedStr, cx, cy + radius * 0.52f, textPaint)
     }
 
-    // --- Gear Indicator ---
-    private fun drawGearIndicator(canvas: Canvas, x: Float, y: Float, w: Float, h: Float, gear: String) {
+    // ============================================================
+    // GEAR INDICATOR
+    // ============================================================
+    private fun drawGearIndicator(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
+                                  gear: String, cr: Float) {
         val name = when (gear) { "F" -> "SPORT"; "R" -> "REVERSE"; else -> "NEUTRAL" }
         val col = when (gear) { "F" -> ACCENT_GREEN; "R" -> ACCENT_RED; else -> ACCENT_BLUE }
 
-        paint.color = col
-        rectF.set(x + 2, y + 2, x + w - 2, y + h - 2)
-        canvas.drawRoundRect(rectF, 8f, 8f, paint)
+        // Gradient fill
+        val grad = LinearGradient(x, y, x, y + h,
+            intArrayOf(col, adjustAlpha(col, 0.7f)), null, Shader.TileMode.CLAMP)
+        paint.shader = grad
+        rectF.set(x + 1, y + 1, x + w - 1, y + h - 1)
+        canvas.drawRoundRect(rectF, cr, cr, paint)
+        paint.shader = null
 
         textPaint.color = Color.WHITE
-        textPaint.textSize = min(20f, h * 0.42f)
+        textPaint.textSize = min(22f, h * 0.45f)
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
         canvas.drawText(name, x + w / 2, y + h / 2 + textPaint.textSize * 0.35f, textPaint)
     }
 
-    // --- Odometer ---
+    // ============================================================
+    // ODOMETER (Trip + Session)
+    // ============================================================
     private fun drawOdometer(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
-                             totalKm: Float, sessionKm: Float, sessionSecs: Int, totalHours: Float) {
-        paint.color = BG_PANEL
+                             sessionKm: Float, sessionSecs: Int, cr: Float) {
+        val grad = LinearGradient(x, y, x, y + h,
+            intArrayOf(BG_CARD_LIGHT, BG_CARD), null, Shader.TileMode.CLAMP)
+        cardPaint.shader = grad
         rectF.set(x, y, x + w, y + h)
-        canvas.drawRoundRect(rectF, 6f, 6f, paint)
+        canvas.drawRoundRect(rectF, cr, cr, cardPaint)
+        cardPaint.shader = null
 
-        val colW = w / 4f
+        paint.color = CARD_BORDER
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1f
+        canvas.drawRoundRect(rectF, cr, cr, paint)
+        paint.style = Paint.Style.FILL
+
         val hrs = sessionSecs / 3600
         val mins = (sessionSecs % 3600) / 60
-        val timeStr = "$hrs:${mins.toString().padStart(2, '0')}"
 
-        val cols = arrayOf(
-            Triple("Total", String.format("%.1fkm", totalKm), TEXT_PRI),
-            Triple("Trip", String.format("%.1fkm", sessionKm), ACCENT_BLUE),
-            Triple("Session", timeStr, ACCENT_BLUE),
-            Triple("Hours", String.format("%.1fh", totalHours), TEXT_PRI)
-        )
+        val colW = w / 2f
 
-        for (i in cols.indices) {
-            val cx = x + i * colW + 8f
-            textPaint.textAlign = Paint.Align.LEFT
+        // Trip
+        textPaint.color = TEXT_DIM
+        textPaint.textSize = min(10f, h * 0.22f)
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.typeface = Typeface.MONOSPACE
+        canvas.drawText("TRIP", x + 12f, y + h * 0.35f, textPaint)
 
-            textPaint.color = TEXT_DIM
-            textPaint.textSize = min(9f, h * 0.2f)
-            textPaint.typeface = Typeface.MONOSPACE
-            canvas.drawText(cols[i].first, cx, y + 14f, textPaint)
+        textPaint.color = ACCENT_BLUE
+        textPaint.textSize = min(16f, h * 0.38f)
+        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        canvas.drawText(String.format("%.1f km", sessionKm), x + 12f, y + h * 0.78f, textPaint)
 
-            textPaint.color = cols[i].third
-            textPaint.textSize = min(13f, h * 0.3f)
-            textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-            canvas.drawText(cols[i].second, cx, y + h * 0.7f, textPaint)
-        }
+        // Session time
+        textPaint.color = TEXT_DIM
+        textPaint.textSize = min(10f, h * 0.22f)
+        textPaint.typeface = Typeface.MONOSPACE
+        canvas.drawText("SESSION", x + colW + 8f, y + h * 0.35f, textPaint)
+
+        textPaint.color = ACCENT_BLUE
+        textPaint.textSize = min(16f, h * 0.38f)
+        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        canvas.drawText("$hrs:${mins.toString().padStart(2, '0')}", x + colW + 8f, y + h * 0.78f, textPaint)
     }
 
-    // --- Color helpers ---
+    // ============================================================
+    // RESET BUTTON (small circular arrow)
+    // ============================================================
+    private fun drawResetButton(canvas: Canvas, x: Float, y: Float, w: Float, h: Float, cr: Float) {
+        val grad = LinearGradient(x, y, x, y + h,
+            intArrayOf(BG_CARD_LIGHT, BG_CARD), null, Shader.TileMode.CLAMP)
+        cardPaint.shader = grad
+        rectF.set(x, y, x + w, y + h)
+        canvas.drawRoundRect(rectF, cr, cr, cardPaint)
+        cardPaint.shader = null
+
+        paint.color = ACCENT_ORANGE
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1.5f
+        canvas.drawRoundRect(rectF, cr, cr, paint)
+
+        // Circular arrow icon
+        val cx = x + w / 2
+        val cy = y + h / 2
+        val r = min(w, h) * 0.22f
+        paint.strokeWidth = 2f
+        paint.strokeCap = Paint.Cap.ROUND
+        rectF.set(cx - r, cy - r, cx + r, cy + r)
+        canvas.drawArc(rectF, -60f, 300f, false, paint)
+
+        // Arrowhead
+        val tipAngle = Math.toRadians(-60.0)
+        val tipX = cx + r * cos(tipAngle).toFloat()
+        val tipY = cy + r * sin(tipAngle).toFloat()
+        val arrLen = r * 0.5f
+        canvas.drawLine(tipX, tipY, tipX - arrLen, tipY, paint)
+        canvas.drawLine(tipX, tipY, tipX, tipY + arrLen, paint)
+        paint.style = Paint.Style.FILL
+    }
+
+    // ============================================================
+    // SETTINGS BUTTON
+    // ============================================================
+    private fun drawSettingsButton(canvas: Canvas, x: Float, y: Float, w: Float, h: Float, cr: Float) {
+        val grad = LinearGradient(x, y, x, y + h,
+            intArrayOf(BG_CARD_LIGHT, BG_CARD), null, Shader.TileMode.CLAMP)
+        cardPaint.shader = grad
+        rectF.set(x + 1, y + 1, x + w - 1, y + h - 1)
+        canvas.drawRoundRect(rectF, cr, cr, cardPaint)
+        cardPaint.shader = null
+
+        paint.color = CARD_BORDER
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1f
+        canvas.drawRoundRect(rectF, cr, cr, paint)
+
+        val cx = x + w / 2
+        val cy = y + h / 2
+        val r = min(w, h) * 0.22f
+
+        paint.color = ACCENT_BLUE
+        paint.strokeWidth = 2f
+        canvas.drawCircle(cx, cy, r, paint)
+        canvas.drawCircle(cx, cy, r * 0.35f, paint)
+
+        for (angle in intArrayOf(0, 45, 90, 135)) {
+            val rad = Math.toRadians(angle.toDouble())
+            val x1 = cx + (r * cos(rad)).toFloat()
+            val y1 = cy + (r * sin(rad)).toFloat()
+            val x2 = cx + (r * 1.5f * cos(rad)).toFloat()
+            val y2 = cy + (r * 1.5f * sin(rad)).toFloat()
+            canvas.drawLine(x1, y1, x2, y2, paint)
+            canvas.drawLine(2 * cx - x1, 2 * cy - y1, 2 * cx - x2, 2 * cy - y2, paint)
+        }
+        paint.style = Paint.Style.FILL
+    }
+
+    // ============================================================
+    // BMS BUTTON
+    // ============================================================
+    private fun drawBmsButton(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
+                               connected: Boolean, cr: Float) {
+        val grad = LinearGradient(x, y, x, y + h,
+            intArrayOf(BG_CARD_LIGHT, BG_CARD), null, Shader.TileMode.CLAMP)
+        cardPaint.shader = grad
+        rectF.set(x + 1, y + 1, x + w - 1, y + h - 1)
+        canvas.drawRoundRect(rectF, cr, cr, cardPaint)
+        cardPaint.shader = null
+
+        paint.color = CARD_BORDER
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1f
+        canvas.drawRoundRect(rectF, cr, cr, paint)
+        paint.style = Paint.Style.FILL
+
+        val cx = x + w / 2
+        val cy = y + h / 2
+
+        // Battery icon (small)
+        val bw = w * 0.40f
+        val bh = h * 0.35f
+        val bx = cx - bw / 2
+        val by = cy - bh / 2 - 3f
+        val tipW = 3f
+        val tipH = bh * 0.4f
+
+        val col = if (connected) ACCENT_GREEN else TEXT_DIM
+        paint.color = col
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1.5f
+        rectF.set(bx, by, bx + bw, by + bh)
+        canvas.drawRoundRect(rectF, 2f, 2f, paint)
+        paint.style = Paint.Style.FILL
+
+        // Tip
+        rectF.set(bx + bw + 1, by + (bh - tipH) / 2, bx + bw + 1 + tipW, by + (bh + tipH) / 2)
+        canvas.drawRect(rectF, paint)
+
+        // Status dot
+        if (connected) {
+            paint.color = ACCENT_GREEN
+            canvas.drawCircle(cx, by + bh + 8f, 3f, paint)
+        }
+
+        // Label
+        textPaint.color = col
+        textPaint.textSize = max(7f, min(w * 0.22f, 9f))
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        canvas.drawText("BMS", cx, y + h - 4f, textPaint)
+    }
+
+    // ============================================================
+    // COLOR HELPERS
+    // ============================================================
+    private fun formatNumber(v: Float, decimals: Int): String {
+        return if (v == v.toInt().toFloat()) v.toInt().toString()
+        else String.format("%.${decimals}f", v)
+    }
+
     private fun ampColorInt(amps: Float, maxAmps: Float): Int {
         val ratio = abs(amps) / maxAmps
         if (amps < 0 || ratio < 0.05f) return ACCENT_BLUE
