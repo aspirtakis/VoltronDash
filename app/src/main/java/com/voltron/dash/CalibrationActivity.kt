@@ -16,6 +16,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.voltron.dash.ble.FarDriverParser
 import com.voltron.dash.render.DashboardRenderer
 import android.graphics.*
 import android.util.Log
@@ -25,14 +26,18 @@ class CalibrationActivity : AppCompatActivity() {
 
     companion object {
         const val PREFS_NAME = "voltron_dash"
-        const val KEY_SPEED_FACTOR = "speed_factor"
+        const val KEY_WHEEL_DIAMETER = "wheel_diameter_inch"
         const val KEY_MAX_RPM = "max_rpm"
         const val KEY_MAX_AMPS = "max_amps"
         const val KEY_TOTAL_KM = "total_km"
         const val KEY_TOTAL_HOURS = "total_hours"
-        const val FACTOR_DEFAULT = 0.38f
-        const val FACTOR_MIN = 0.10f
-        const val FACTOR_MAX = 3.00f
+        const val DIAMETER_DEFAULT = 12.0f
+        const val DIAMETER_MIN = 8.0f
+        const val DIAMETER_MAX = 24.0f
+        const val KEY_DIFF_RATIO = "diff_ratio"
+        const val DIFF_DEFAULT = 1.0f
+        const val DIFF_MIN = 1.0f
+        const val DIFF_MAX = 15.0f
         const val RPM_DEFAULT = 5000f
         const val RPM_MIN = 1000f
         const val RPM_MAX = 10000f
@@ -44,14 +49,19 @@ class CalibrationActivity : AppCompatActivity() {
         const val DEFAULT_BMS_MAC = "C8:47:80:4B:70:72"
         const val DEFAULT_BMS_NAME = "JK-BD4A24S10P"
         const val KEY_BMS_ENABLED = "bms_enabled"
+        const val KEY_CONTROLLER_TYPE = "controller_type"
+        const val CTRL_FARDRIVER = "fardriver"
+        const val CTRL_VOTOL = "votol"
     }
 
-    private var factor = FACTOR_DEFAULT
+    private var wheelDiameter = DIAMETER_DEFAULT
+    private var diffRatio = DIFF_DEFAULT
     private var maxRpm = RPM_DEFAULT
     private var maxAmps = AMPS_DEFAULT
     private var savedBmsMac: String? = null
     private var savedBmsName: String? = null
     private var bmsEnabled = false
+    private var controllerType = CTRL_FARDRIVER
     private var bmsScanning = false
     private val bmsScanResults = mutableListOf<Pair<String, String>>() // name, mac
     private var bleScanner: BluetoothLeScanner? = null
@@ -67,12 +77,14 @@ class CalibrationActivity : AppCompatActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        factor = prefs.getFloat(KEY_SPEED_FACTOR, FACTOR_DEFAULT)
+        wheelDiameter = prefs.getFloat(KEY_WHEEL_DIAMETER, DIAMETER_DEFAULT)
+        diffRatio = prefs.getFloat(KEY_DIFF_RATIO, DIFF_DEFAULT)
         maxRpm = prefs.getFloat(KEY_MAX_RPM, RPM_DEFAULT)
         maxAmps = prefs.getFloat(KEY_MAX_AMPS, AMPS_DEFAULT)
         savedBmsMac = prefs.getString(KEY_BMS_MAC, null)
         savedBmsName = prefs.getString(KEY_BMS_NAME, null)
         bmsEnabled = prefs.getBoolean(KEY_BMS_ENABLED, false)
+        controllerType = prefs.getString(KEY_CONTROLLER_TYPE, CTRL_FARDRIVER) ?: CTRL_FARDRIVER
 
         val manager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         bleScanner = manager.adapter?.bluetoothLeScanner
@@ -87,11 +99,13 @@ class CalibrationActivity : AppCompatActivity() {
 
     private fun saveAll() {
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
-            .putFloat(KEY_SPEED_FACTOR, factor)
+            .putFloat(KEY_WHEEL_DIAMETER, wheelDiameter)
+            .putFloat(KEY_DIFF_RATIO, diffRatio)
             .putFloat(KEY_MAX_RPM, maxRpm)
             .putFloat(KEY_MAX_AMPS, maxAmps)
             .apply()
-        DashboardRenderer.speedFactor = factor
+        FarDriverParser.wheelDiameterInch = wheelDiameter
+        FarDriverParser.diffRatio = diffRatio
         DashboardRenderer.maxRpm = maxRpm
         DashboardRenderer.maxAmps = maxAmps
     }
@@ -182,7 +196,7 @@ class CalibrationActivity : AppCompatActivity() {
         private val GAUGE_BG = 0xFF253660.toInt()
         private val CARD_BORDER = 0xFF2A4080.toInt()
 
-        private var draggingSlider = -1  // 0=speed, 1=rpm, 2=amps
+        private var draggingSlider = -1  // 0=wheel, 1=diff, 2=rpm, 3=amps
 
         // Layout constants
         private val headerH = 56f
@@ -227,10 +241,17 @@ class CalibrationActivity : AppCompatActivity() {
             // === LEFT COLUMN: 3 sliders ===
             var sy = headerH + 16f
 
-            // Speed Factor slider
+            // Wheel Diameter slider
             sy = drawSlider(canvas, leftX, sy, leftW,
-                "Speed Factor", String.format("%.2fx", factor),
-                "(differential ratio)", factor, FACTOR_MIN, FACTOR_MAX, ACCENT_BLUE)
+                "Wheel Diameter", String.format("%.1f\"", wheelDiameter),
+                "(total incl. tire)", wheelDiameter, DIAMETER_MIN, DIAMETER_MAX, ACCENT_BLUE)
+
+            sy += 8f
+
+            // Differential Ratio slider
+            sy = drawSlider(canvas, leftX, sy, leftW,
+                "Diff Ratio", String.format("%.1f:1", diffRatio),
+                "(motor:wheel, 1=hub)", diffRatio, DIFF_MIN, DIFF_MAX, ACCENT_BLUE)
 
             sy += 8f
 
@@ -258,15 +279,51 @@ class CalibrationActivity : AppCompatActivity() {
             textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             canvas.drawText("Save & Close", leftX + leftW / 2, saveBtnY + saveBtnH / 2 + 6f, textPaint)
 
-            // === RIGHT COLUMN: Reset buttons ===
+            // === RIGHT COLUMN ===
+            var rightY = headerH + 16f
+
+            // Controller type toggle
             textPaint.color = ACCENT_BLUE
             textPaint.textSize = 15f
             textPaint.textAlign = Paint.Align.CENTER
             textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-            canvas.drawText("Data", rightX + rightW / 2, headerH + 36f, textPaint)
+            canvas.drawText("Controller", rightX + rightW / 2, rightY + 14f, textPaint)
+            rightY += 22f
+
+            val ctrlToggleH = 40f
+            val isVotol = controllerType == CalibrationActivity.CTRL_VOTOL
+            val ctrlColor = if (isVotol) ACCENT_ORANGE else ACCENT_BLUE
+            val ctrlLabel = if (isVotol) "Votol" else "FarDriver"
+            paint.color = BG_CARD
+            rectF.set(rightX, rightY, rightX + rightW, rightY + ctrlToggleH)
+            canvas.drawRoundRect(rectF, 10f, 10f, paint)
+            paint.color = ctrlColor
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 2f
+            canvas.drawRoundRect(rectF, 10f, 10f, paint)
+            paint.style = Paint.Style.FILL
+
+            val ctrlDotX = if (isVotol) rightX + rightW - 20f else rightX + 20f
+            paint.color = ctrlColor
+            canvas.drawCircle(ctrlDotX, rightY + ctrlToggleH / 2, 8f, paint)
+
+            textPaint.color = ctrlColor
+            textPaint.textSize = 14f
+            textPaint.textAlign = Paint.Align.CENTER
+            textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            canvas.drawText(ctrlLabel, rightX + rightW / 2, rightY + ctrlToggleH / 2 + 5f, textPaint)
+            rightY += ctrlToggleH + 16f
+
+            // Data section
+            textPaint.color = ACCENT_BLUE
+            textPaint.textSize = 15f
+            textPaint.textAlign = Paint.Align.CENTER
+            textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            canvas.drawText("Data", rightX + rightW / 2, rightY + 14f, textPaint)
+            rightY += 22f
 
             val btnH = 54f
-            val tripBtnY = headerH + 52f
+            val tripBtnY = rightY
             drawButton(canvas, rightX, tripBtnY, rightW, btnH,
                 "Reset Trip", "Resets session km & kWh", ACCENT_ORANGE)
 
@@ -475,19 +532,24 @@ class CalibrationActivity : AppCompatActivity() {
             var sy = headerH + 16f
             val ranges = mutableListOf<Triple<Float, Float, Float>>()
 
-            // Speed factor
+            // Wheel diameter (has subtitle)
             val track1Y = sy + 20f + 14f + 10f // after title + subtitle + gap
             ranges.add(Triple(track1Y, leftW, 0f))
 
-            // Max RPM
+            // Diff ratio (has subtitle)
             val track2Start = track1Y + sliderH + 24f + 8f
-            val track2Y = track2Start + 20f + 10f // after title + gap (no subtitle)
+            val track2Y = track2Start + 20f + 14f + 10f // after title + subtitle + gap
             ranges.add(Triple(track2Y, leftW, 1f))
 
-            // Max Amps
+            // Max RPM (no subtitle)
             val track3Start = track2Y + sliderH + 24f + 8f
-            val track3Y = track3Start + 20f + 10f
+            val track3Y = track3Start + 20f + 10f // after title + gap
             ranges.add(Triple(track3Y, leftW, 2f))
+
+            // Max Amps (no subtitle)
+            val track4Start = track3Y + sliderH + 24f + 8f
+            val track4Y = track4Start + 20f + 10f
+            ranges.add(Triple(track4Y, leftW, 3f))
 
             return ranges
         }
@@ -534,8 +596,21 @@ class CalibrationActivity : AppCompatActivity() {
                     if (x > colW) {
                         val rightX = colW + margin * 0.5f
                         val rightW = colW - margin * 1.5f
+
+                        // Controller toggle (matches draw layout)
+                        var rightY = headerH + 16f + 22f  // after "Controller" label
+                        val ctrlToggleH = 40f
+                        if (y in rightY..(rightY + ctrlToggleH) && x in rightX..(rightX + rightW)) {
+                            controllerType = if (controllerType == CTRL_VOTOL) CTRL_FARDRIVER else CTRL_VOTOL
+                            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                                .putString(KEY_CONTROLLER_TYPE, controllerType).apply()
+                            invalidate()
+                            return true
+                        }
+                        rightY += ctrlToggleH + 16f + 22f  // after Data label
+
                         val btnH = 54f
-                        val tripBtnY = headerH + 52f
+                        val tripBtnY = rightY
                         val allBtnY = tripBtnY + btnH + 28f
 
                         if (y in tripBtnY..(tripBtnY + btnH) && x in rightX..(rightX + rightW)) {
@@ -614,14 +689,18 @@ class CalibrationActivity : AppCompatActivity() {
             val frac = ((x - marginX) / trackW).coerceIn(0f, 1f)
             when (slider) {
                 0 -> {
-                    val raw = FACTOR_MIN + frac * (FACTOR_MAX - FACTOR_MIN)
-                    factor = (raw * 100).toInt() / 100f
+                    val raw = DIAMETER_MIN + frac * (DIAMETER_MAX - DIAMETER_MIN)
+                    wheelDiameter = (raw * 2).toInt() / 2f // snap to 0.5" increments
                 }
                 1 -> {
+                    val raw = DIFF_MIN + frac * (DIFF_MAX - DIFF_MIN)
+                    diffRatio = (raw * 10).toInt() / 10f // snap to 0.1 increments
+                }
+                2 -> {
                     val raw = RPM_MIN + frac * (RPM_MAX - RPM_MIN)
                     maxRpm = (raw / 100).toInt() * 100f // snap to 100s
                 }
-                2 -> {
+                3 -> {
                     val raw = AMPS_MIN + frac * (AMPS_MAX - AMPS_MIN)
                     maxAmps = (raw / 10).toInt() * 10f // snap to 10s
                 }

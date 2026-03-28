@@ -18,7 +18,8 @@ object FarDriverParser {
     // Battery config
     private const val BATTERY_TOTAL_WH = 7992f // 120Ah * 66.6V
     private const val DEFAULT_KM_PER_KWH = 20f // default efficiency until real data available
-    var speedFactor = 0.38f
+    var wheelDiameterInch = 12.0f
+    var diffRatio = 1.0f  // differential/gear ratio (motor RPM / wheel RPM)
 
     // SOC voltage table: 18S Li-ion
     private val SOC_TABLE = arrayOf(
@@ -75,14 +76,12 @@ object FarDriverParser {
     }
 
     fun calcSpeedKmh(state: MutableState): Float {
-        if (state.rateRatio > 0 && state.wheelRadius > 0) {
-            val raw = Math.abs(state.speedRaw)
-            val tireSize = state.wheelRadius * 1270 + state.wheelWidth * state.wheelRatio
-            val speed = raw * 0.00376991136f * tireSize / state.rateRatio
-            return (speed * 10).toInt() / 10f
-        }
-        // Fallback: RPM * circumference * 60 / 1000
-        return (state.rpm * 2.074f * 60f / 1000f * 10).toInt() / 10f
+        // wheel_rpm = motor_rpm / diff_ratio
+        // speed = wheel_rpm × π × diameter(m) × 60 / 1000
+        val diameterM = wheelDiameterInch * 0.0254
+        val wheelRpm = state.rpm / diffRatio
+        val raw = wheelRpm * Math.PI * diameterM * 60.0 / 1000.0
+        return (raw * 10).toInt() / 10f
     }
 
     /** Mutable state accumulated across frames. */
@@ -117,6 +116,7 @@ object FarDriverParser {
         var rangeKm: Int = 0
         var smoothedSoc: Float = -1f  // EMA-smoothed SOC, -1 = uninitialized
         var lastSpeedTime: Long = 0
+        var lastEnergyTime: Long = 0
         var whPerKmSamples: MutableList<Float> = mutableListOf()
 
         fun toData(): FarDriverData {
@@ -216,17 +216,14 @@ object FarDriverParser {
                 state.soc = state.smoothedSoc.toInt().coerceIn(0, 100)
 
                 // Track energy usage — only when moving (ignore idle drain at traffic lights)
-                val actualSpeed = state.speedKmh * speedFactor
-                if (state.power > 0 && actualSpeed > 0.5f) {
-                    val now = System.currentTimeMillis()
-                    if (state.lastSpeedTime > 0) {
-                        val dtHours = (now - state.lastSpeedTime) / 3600000f
+                val now = System.currentTimeMillis()
+                if (state.power > 0 && state.speedKmh > 0.5f) {
+                    if (state.lastEnergyTime > 0) {
+                        val dtHours = (now - state.lastEnergyTime) / 3600000f
                         state.kwhUsed += state.power * dtHours / 1000f
                     }
-                    state.lastSpeedTime = now
-                } else {
-                    state.lastSpeedTime = System.currentTimeMillis()
                 }
+                state.lastEnergyTime = now
 
                 // Range estimate
                 val remainingKwh = state.soc / 100f * BATTERY_TOTAL_WH / 1000f
@@ -270,10 +267,9 @@ object FarDriverParser {
 
     private fun updateTracking(state: MutableState) {
         val now = System.currentTimeMillis()
-        val actualSpeed = state.speedKmh * speedFactor
-        if (state.lastSpeedTime > 0 && actualSpeed > 0.5f) {
+        if (state.lastSpeedTime > 0 && state.speedKmh > 0.5f) {
             val dtHours = (now - state.lastSpeedTime) / 3600000f
-            val distKm = actualSpeed * dtHours
+            val distKm = state.speedKmh * dtHours
             state.sessionKm += distKm
             state.totalKm += distKm
             state.totalHours += dtHours

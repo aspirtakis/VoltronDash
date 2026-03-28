@@ -19,6 +19,7 @@ import android.util.Log
 import com.voltron.dash.ble.FarDriverBLE
 import com.voltron.dash.ble.FarDriverParser
 import com.voltron.dash.ble.JkBmsBLE
+import com.voltron.dash.ble.VotolBLE
 import com.voltron.dash.render.DashboardRenderer
 
 class MainActivity : AppCompatActivity() {
@@ -29,9 +30,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private lateinit var dashView: DashboardView
-    private var ble: FarDriverBLE? = null
+    private var farDriverBle: FarDriverBLE? = null
+    private var votolBle: VotolBLE? = null
     private var bmsBle: JkBmsBLE? = null
     private var currentBmsMac: String? = null
+    private var currentControllerType: String = CalibrationActivity.CTRL_FARDRIVER
     private val handler = Handler(Looper.getMainLooper())
 
     private val refreshRunnable = object : Runnable {
@@ -54,7 +57,7 @@ class MainActivity : AppCompatActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         // Load speed factor and logo
-        loadSpeedFactor()
+        loadSettings()
         DashboardRenderer.init(this)
 
         // Pre-save default BMS MAC if not configured
@@ -87,12 +90,23 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        loadSpeedFactor()
+        loadSettings()
         handler.post(refreshRunnable)
 
+        val prefs = getSharedPreferences(CalibrationActivity.PREFS_NAME, Context.MODE_PRIVATE)
+        val savedType = prefs.getString(CalibrationActivity.KEY_CONTROLLER_TYPE,
+            CalibrationActivity.CTRL_FARDRIVER) ?: CalibrationActivity.CTRL_FARDRIVER
+
+        // If controller type changed, restart BLE
+        if (savedType != currentControllerType) {
+            stopControllerBLE()
+            currentControllerType = savedType
+            controllerConnected = false
+            startBLE()
+        }
+
         // Reload BMS settings — start/stop based on toggle
-        if (fdConnected) {
-            val prefs = getSharedPreferences(CalibrationActivity.PREFS_NAME, Context.MODE_PRIVATE)
+        if (controllerConnected) {
             val bmsOn = prefs.getBoolean(CalibrationActivity.KEY_BMS_ENABLED, false)
             val savedMac = prefs.getString(CalibrationActivity.KEY_BMS_MAC, null)
 
@@ -121,15 +135,24 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        ble?.stop()
+        stopControllerBLE()
         bmsBle?.stop()
     }
 
-    private fun loadSpeedFactor() {
+    private fun stopControllerBLE() {
+        farDriverBle?.stop()
+        farDriverBle = null
+        votolBle?.stop()
+        votolBle = null
+    }
+
+    private fun loadSettings() {
         val prefs = getSharedPreferences(CalibrationActivity.PREFS_NAME, Context.MODE_PRIVATE)
-        val sf = prefs.getFloat(CalibrationActivity.KEY_SPEED_FACTOR, CalibrationActivity.FACTOR_DEFAULT)
-        DashboardRenderer.speedFactor = sf
-        FarDriverParser.speedFactor = sf
+        FarDriverParser.wheelDiameterInch = prefs.getFloat(
+            CalibrationActivity.KEY_WHEEL_DIAMETER, CalibrationActivity.DIAMETER_DEFAULT)
+        FarDriverParser.diffRatio = prefs.getFloat(
+            CalibrationActivity.KEY_DIFF_RATIO, CalibrationActivity.DIFF_DEFAULT)
+
         DashboardRenderer.maxRpm = prefs.getFloat(
             CalibrationActivity.KEY_MAX_RPM,
             CalibrationActivity.RPM_DEFAULT
@@ -169,34 +192,46 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private var fdConnected = false
+    private var controllerConnected = false
 
     private fun startBLE() {
-        Log.i("VoltronDash", "Starting FarDriver BLE...")
-        ble = FarDriverBLE(
-            context = this,
-            onData = { data ->
-                dashView.data = data
-                DashboardRenderer.fdStatus = "FD: Live"
-                // Start BMS only after FarDriver is streaming and if enabled
-                if (!fdConnected) {
-                    fdConnected = true
-                    val prefs = getSharedPreferences(CalibrationActivity.PREFS_NAME, Context.MODE_PRIVATE)
-                    val bmsOn = prefs.getBoolean(CalibrationActivity.KEY_BMS_ENABLED, false)
-                    val bmsMac = prefs.getString(CalibrationActivity.KEY_BMS_MAC, null)
-                    if (bmsOn && bmsMac != null && bmsBle == null) {
-                        currentBmsMac = bmsMac
-                        Log.i("VoltronDash", "FarDriver connected, starting BMS in 2s...")
-                        handler.postDelayed({ startBMS(bmsMac) }, 2000)
-                    }
+        val prefs = getSharedPreferences(CalibrationActivity.PREFS_NAME, Context.MODE_PRIVATE)
+        currentControllerType = prefs.getString(CalibrationActivity.KEY_CONTROLLER_TYPE,
+            CalibrationActivity.CTRL_FARDRIVER) ?: CalibrationActivity.CTRL_FARDRIVER
+
+        val onData: (com.voltron.dash.ble.FarDriverData) -> Unit = { data ->
+            dashView.data = data
+            val tag = if (currentControllerType == CalibrationActivity.CTRL_VOTOL) "VT" else "FD"
+            DashboardRenderer.fdStatus = "$tag: Live"
+            // Start BMS only after controller is streaming and if enabled
+            if (!controllerConnected) {
+                controllerConnected = true
+                val p = getSharedPreferences(CalibrationActivity.PREFS_NAME, Context.MODE_PRIVATE)
+                val bmsOn = p.getBoolean(CalibrationActivity.KEY_BMS_ENABLED, false)
+                val bmsMac = p.getString(CalibrationActivity.KEY_BMS_MAC, null)
+                if (bmsOn && bmsMac != null && bmsBle == null) {
+                    currentBmsMac = bmsMac
+                    Log.i("VoltronDash", "Controller connected, starting BMS in 2s...")
+                    handler.postDelayed({ startBMS(bmsMac) }, 2000)
                 }
-            },
-            onStatus = { status ->
-                Log.i("VoltronDash", "FarDriver: $status")
-                DashboardRenderer.fdStatus = "FD: $status"
             }
-        )
-        ble?.start()
+        }
+
+        val onStatus: (String) -> Unit = { status ->
+            val tag = if (currentControllerType == CalibrationActivity.CTRL_VOTOL) "VT" else "FD"
+            Log.i("VoltronDash", "$tag: $status")
+            DashboardRenderer.fdStatus = "$tag: $status"
+        }
+
+        if (currentControllerType == CalibrationActivity.CTRL_VOTOL) {
+            Log.i("VoltronDash", "Starting Votol BLE...")
+            votolBle = VotolBLE(context = this, onData = onData, onStatus = onStatus)
+            votolBle?.start()
+        } else {
+            Log.i("VoltronDash", "Starting FarDriver BLE...")
+            farDriverBle = FarDriverBLE(context = this, onData = onData, onStatus = onStatus)
+            farDriverBle?.start()
+        }
     }
 
     private fun startBMS(mac: String) {

@@ -44,7 +44,6 @@ object DashboardRenderer {
     private val rectF = RectF()
 
     var glowPhase = 0f
-    var speedFactor = 0.38f
     var resetTrip = false
     var resetAll = false
     var fdStatus = "FD: --"
@@ -126,7 +125,7 @@ object DashboardRenderer {
         drawSidebar(canvas, sidebarX, pad, sidebarW, hf - pad * 2, data, cr)
 
         // === BIG SPEED (left of center) ===
-        val adjustedSpeed = (data.speedKmh * speedFactor).toInt()
+        val adjustedSpeed = data.speedKmh.toInt()
         drawBigSpeed(canvas, mainX, pad, speedW, topH, adjustedSpeed, data.totalKm, data.totalHours, data.kwhUsed, cr)
 
         // === DUAL RPM+AMP GAUGE (right of center) ===
@@ -242,10 +241,10 @@ object DashboardRenderer {
         canvas.drawText("km/h", x + w / 2, y + h * 0.48f + fontSize * 0.38f, textPaint)
 
         // Odometer line
-        val odoSize = max(9f, fontSize * 0.13f)
-        textPaint.color = 0xFF4A6A9E.toInt()
+        val odoSize = max(10f, fontSize * 0.15f)
+        textPaint.color = Color.WHITE
         textPaint.textSize = odoSize
-        textPaint.typeface = Typeface.MONOSPACE
+        textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
         val odoStr = String.format("%.1f km  %.1f h  %.2f kWh", totalKm, totalHours, kwhUsed)
         canvas.drawText(odoStr, x + w / 2, y + h * 0.88f, textPaint)
     }
@@ -421,6 +420,11 @@ object DashboardRenderer {
 
         var slotIdx = 0
 
+        // kWh dual gauge — outer: remaining, inner: used (TOP)
+        drawDualKwhGauge(canvas, x, gaugeY + slotIdx * (slotH + gap), w, slotH,
+            data.soc, data.kwhUsed)
+        slotIdx++
+
         // ECU temp
         drawRingGauge(canvas, x, gaugeY + slotIdx * (slotH + gap), w, slotH,
             "ECU", "${data.controllerTemp}\u00b0", data.controllerTemp / 120f,
@@ -439,12 +443,7 @@ object DashboardRenderer {
             drawRingGauge(canvas, x, gaugeY + slotIdx * (slotH + gap), w, slotH,
                 "BAT", "${avgBatTemp.toInt()}\u00b0", avgBatTemp / 60f,
                 tempColorInt(avgBatTemp.toInt()))
-            slotIdx++
         }
-
-        // kWh dual gauge — outer: remaining, inner: used
-        drawDualKwhGauge(canvas, x, gaugeY + slotIdx * (slotH + gap), w, slotH,
-            data.soc, data.kwhUsed)
     }
 
     // Dual ring kWh gauge — outer=remaining, inner=used
@@ -510,10 +509,10 @@ object DashboardRenderer {
             else -> ACCENT_ORANGE
         }
         textPaint.color = usedCol
-        textPaint.textSize = max(5f, outerR * 0.26f)
+        textPaint.textSize = max(7f, outerR * 0.36f)
         textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-        val usedStr = if (kwhUsed < 10) String.format("-%.1f", kwhUsed) else String.format("-%.0f", kwhUsed)
-        canvas.drawText(usedStr, cx, cy + outerR * 0.28f, textPaint)
+        val usedStr = if (kwhUsed < 10) String.format("-%.2f", kwhUsed) else String.format("-%.1f", kwhUsed)
+        canvas.drawText(usedStr, cx, cy + outerR * 0.32f, textPaint)
 
         // Label (just below rings)
         textPaint.color = TEXT_DIM
