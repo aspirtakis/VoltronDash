@@ -1,15 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- BLE permissions (Android 12+: no location needed with neverForLocation) -->
+    <!-- BLE permissions: Android 11 and below -->
+    <uses-permission android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"
+        android:maxSdkVersion="30" />
+    <!-- BLE permissions: Android 12+ (no location needed with neverForLocation) -->
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <!-- Location only needed for BLE scan on Android 11 and below -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
-        android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"
-        android:maxSdkVersion="30" />
+
+    <!-- Auto-launch on boot -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- Android Auto surface access -->
     <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
@@ -28,6 +34,7 @@
         <activity
             android:name=".SplashActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@style/Theme.VoltronDash">
@@ -41,6 +48,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="false"
+            android:launchMode="singleTask"
             android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@style/Theme.VoltronDash" />
@@ -58,6 +66,16 @@
             android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@style/Theme.VoltronDash" />
+
+        <!-- Auto-launch on boot -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Android Auto car app service -->
         <service

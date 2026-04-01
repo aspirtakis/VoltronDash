@@ -46,6 +46,10 @@ class DashboardView @JvmOverloads constructor(
                 onBmsTap?.invoke()
                 return true
             }
+            if (DashboardRenderer.faultClearRect.contains(event.x, event.y)) {
+                DashboardRenderer.clearFaults = true
+                return true
+            }
         }
         return super.onTouchEvent(event)
     }

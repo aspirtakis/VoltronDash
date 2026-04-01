@@ -15,17 +15,19 @@ object FarDriverParser {
     private const val CRC_INIT = 0x7F3C
     private const val CRC_POLY = 0xA001
 
-    // Battery config
-    private const val BATTERY_TOTAL_WH = 7992f // 120Ah * 66.6V
-    private const val DEFAULT_KM_PER_KWH = 20f // default efficiency until real data available
+    // Battery config — set from Settings
+    var batteryCells = 18
+    var batteryAh = 120f
+    val batteryTotalWh: Float get() = batteryAh * batteryCells * 3.7f
+    private const val DEFAULT_KM_PER_KWH = 20f
     var wheelDiameterInch = 12.0f
     var diffRatio = 1.0f  // differential/gear ratio (motor RPM / wheel RPM)
 
-    // SOC voltage table: 18S Li-ion
-    private val SOC_TABLE = arrayOf(
-        54.0f to 0, 59.4f to 5, 63.0f to 10, 64.8f to 20,
-        66.6f to 30, 68.4f to 50, 70.2f to 65, 72.0f to 80,
-        73.8f to 90, 75.6f to 100
+    // SOC per-cell voltage table (Li-ion NMC)
+    private val SOC_CELL_TABLE = arrayOf(
+        3.00f to 0, 3.30f to 5, 3.50f to 10, 3.60f to 20,
+        3.70f to 30, 3.80f to 50, 3.90f to 65, 4.00f to 80,
+        4.10f to 90, 4.20f to 100
     )
 
     // Register address lookup table
@@ -62,11 +64,16 @@ object FarDriverParser {
     }
 
     fun estimateSoc(voltage: Float): Int {
-        if (voltage <= SOC_TABLE.first().first) return SOC_TABLE.first().second
-        if (voltage >= SOC_TABLE.last().first) return SOC_TABLE.last().second
-        for (i in 0 until SOC_TABLE.size - 1) {
-            val (vLo, socLo) = SOC_TABLE[i]
-            val (vHi, socHi) = SOC_TABLE[i + 1]
+        val s = batteryCells
+        val vMin = SOC_CELL_TABLE.first().first * s
+        val vMax = SOC_CELL_TABLE.last().first * s
+        if (voltage <= vMin) return SOC_CELL_TABLE.first().second
+        if (voltage >= vMax) return SOC_CELL_TABLE.last().second
+        for (i in 0 until SOC_CELL_TABLE.size - 1) {
+            val vLo = SOC_CELL_TABLE[i].first * s
+            val socLo = SOC_CELL_TABLE[i].second
+            val vHi = SOC_CELL_TABLE[i + 1].first * s
+            val socHi = SOC_CELL_TABLE[i + 1].second
             if (voltage in vLo..vHi) {
                 val ratio = (voltage - vLo) / (vHi - vLo)
                 return (socLo + ratio * (socHi - socLo)).toInt()
@@ -226,7 +233,7 @@ object FarDriverParser {
                 state.lastEnergyTime = now
 
                 // Range estimate
-                val remainingKwh = state.soc / 100f * BATTERY_TOTAL_WH / 1000f
+                val remainingKwh = state.soc / 100f * batteryTotalWh / 1000f
                 val kmPerKwh = if (state.kwhUsed > 0.05f && state.totalKm > 0.5f) {
                     val measured = state.totalKm / state.kwhUsed
                     if (measured in 2f..100f) measured else DEFAULT_KM_PER_KWH

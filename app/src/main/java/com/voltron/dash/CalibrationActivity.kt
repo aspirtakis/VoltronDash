@@ -44,6 +44,14 @@ class CalibrationActivity : AppCompatActivity() {
         const val AMPS_DEFAULT = 150f
         const val AMPS_MIN = 50f
         const val AMPS_MAX = 500f
+        const val KEY_BATTERY_S = "battery_cells"
+        const val KEY_BATTERY_AH = "battery_ah"
+        const val CELLS_DEFAULT = 18f
+        const val CELLS_MIN = 1f
+        const val CELLS_MAX = 32f
+        const val AH_DEFAULT = 120f
+        const val AH_MIN = 10f
+        const val AH_MAX = 300f
         const val KEY_BMS_MAC = "bms_mac"
         const val KEY_BMS_NAME = "bms_name"
         const val DEFAULT_BMS_MAC = "C8:47:80:4B:70:72"
@@ -58,6 +66,8 @@ class CalibrationActivity : AppCompatActivity() {
     private var diffRatio = DIFF_DEFAULT
     private var maxRpm = RPM_DEFAULT
     private var maxAmps = AMPS_DEFAULT
+    private var batteryCells = CELLS_DEFAULT
+    private var batteryAh = AH_DEFAULT
     private var savedBmsMac: String? = null
     private var savedBmsName: String? = null
     private var bmsEnabled = false
@@ -81,6 +91,8 @@ class CalibrationActivity : AppCompatActivity() {
         diffRatio = prefs.getFloat(KEY_DIFF_RATIO, DIFF_DEFAULT)
         maxRpm = prefs.getFloat(KEY_MAX_RPM, RPM_DEFAULT)
         maxAmps = prefs.getFloat(KEY_MAX_AMPS, AMPS_DEFAULT)
+        batteryCells = prefs.getFloat(KEY_BATTERY_S, CELLS_DEFAULT)
+        batteryAh = prefs.getFloat(KEY_BATTERY_AH, AH_DEFAULT)
         savedBmsMac = prefs.getString(KEY_BMS_MAC, null)
         savedBmsName = prefs.getString(KEY_BMS_NAME, null)
         bmsEnabled = prefs.getBoolean(KEY_BMS_ENABLED, false)
@@ -98,14 +110,24 @@ class CalibrationActivity : AppCompatActivity() {
     }
 
     private fun saveAll() {
-        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+        val edit = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
             .putFloat(KEY_WHEEL_DIAMETER, wheelDiameter)
             .putFloat(KEY_DIFF_RATIO, diffRatio)
             .putFloat(KEY_MAX_RPM, maxRpm)
             .putFloat(KEY_MAX_AMPS, maxAmps)
-            .apply()
+            .putFloat(KEY_BATTERY_S, batteryCells)
+            .putFloat(KEY_BATTERY_AH, batteryAh)
+            .putString(KEY_CONTROLLER_TYPE, controllerType)
+            .putBoolean(KEY_BMS_ENABLED, bmsEnabled)
+        if (savedBmsMac != null) {
+            edit.putString(KEY_BMS_MAC, savedBmsMac)
+            edit.putString(KEY_BMS_NAME, savedBmsName)
+        }
+        edit.apply()
         FarDriverParser.wheelDiameterInch = wheelDiameter
         FarDriverParser.diffRatio = diffRatio
+        FarDriverParser.batteryCells = batteryCells.toInt()
+        FarDriverParser.batteryAh = batteryAh
         DashboardRenderer.maxRpm = maxRpm
         DashboardRenderer.maxAmps = maxAmps
     }
@@ -238,34 +260,32 @@ class CalibrationActivity : AppCompatActivity() {
             paint.color = CARD_BORDER
             canvas.drawRect(colW - 0.5f, headerH + 10f, colW + 0.5f, h - 10f, paint)
 
-            // === LEFT COLUMN: 3 sliders ===
-            var sy = headerH + 16f
+            // === LEFT COLUMN: sliders ===
+            var sy = headerH + 10f
 
-            // Wheel Diameter slider
             sy = drawSlider(canvas, leftX, sy, leftW,
-                "Wheel Diameter", String.format("%.1f\"", wheelDiameter),
-                "(total incl. tire)", wheelDiameter, DIAMETER_MIN, DIAMETER_MAX, ACCENT_BLUE)
+                "Wheel", String.format("%.1f\"", wheelDiameter),
+                wheelDiameter, DIAMETER_MIN, DIAMETER_MAX, ACCENT_BLUE)
 
-            sy += 8f
-
-            // Differential Ratio slider
             sy = drawSlider(canvas, leftX, sy, leftW,
                 "Diff Ratio", String.format("%.1f:1", diffRatio),
-                "(motor:wheel, 1=hub)", diffRatio, DIFF_MIN, DIFF_MAX, ACCENT_BLUE)
+                diffRatio, DIFF_MIN, DIFF_MAX, ACCENT_BLUE)
 
-            sy += 8f
-
-            // Max RPM slider
             sy = drawSlider(canvas, leftX, sy, leftW,
-                "Max RPM", "${maxRpm.toInt()}", null,
+                "Max RPM", "${maxRpm.toInt()}",
                 maxRpm, RPM_MIN, RPM_MAX, ACCENT_GREEN)
 
-            sy += 8f
-
-            // Max Amps slider
             sy = drawSlider(canvas, leftX, sy, leftW,
-                "Max Amps", "${maxAmps.toInt()}A", null,
+                "Max Amps", "${maxAmps.toInt()}A",
                 maxAmps, AMPS_MIN, AMPS_MAX, ACCENT_ORANGE)
+
+            sy = drawSlider(canvas, leftX, sy, leftW,
+                "Battery", "${batteryCells.toInt()}S / ${String.format("%.1f", batteryCells.toInt() * 3.7f)}V",
+                batteryCells, CELLS_MIN, CELLS_MAX, ACCENT_BLUE)
+
+            sy = drawSlider(canvas, leftX, sy, leftW,
+                "Capacity", "${batteryAh.toInt()}Ah / ${String.format("%.1f", batteryAh * batteryCells.toInt() * 3.7f / 1000f)}kWh",
+                batteryAh, AH_MIN, AH_MAX, ACCENT_BLUE)
 
             // Save button (bottom of left column)
             val saveBtnH = 48f
@@ -430,33 +450,20 @@ class CalibrationActivity : AppCompatActivity() {
         }
 
         private fun drawSlider(canvas: Canvas, x: Float, y: Float, w: Float,
-                               title: String, valueStr: String, subtitle: String?,
+                               title: String, valueStr: String,
                                value: Float, minVal: Float, maxVal: Float, color: Int): Float {
-            // Title
+            // Title + value on same line
             textPaint.color = color
-            textPaint.textSize = 13f
+            textPaint.textSize = 12f
             textPaint.textAlign = Paint.Align.LEFT
             textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-            canvas.drawText(title, x, y + 14f, textPaint)
+            canvas.drawText(title, x, y + 12f, textPaint)
 
-            // Value
             textPaint.textAlign = Paint.Align.RIGHT
-            textPaint.textSize = 13f
-            canvas.drawText(valueStr, x + w, y + 14f, textPaint)
-
-            var curY = y + 20f
-
-            if (subtitle != null) {
-                textPaint.color = TEXT_DIM
-                textPaint.textSize = 9f
-                textPaint.textAlign = Paint.Align.LEFT
-                textPaint.typeface = Typeface.MONOSPACE
-                canvas.drawText(subtitle, x, curY + 10f, textPaint)
-                curY += 14f
-            }
+            canvas.drawText(valueStr, x + w, y + 12f, textPaint)
 
             // Track
-            val trackY = curY + 10f
+            val trackY = y + 18f
             paint.color = GAUGE_BG
             rectF.set(x, trackY, x + w, trackY + sliderH)
             canvas.drawRoundRect(rectF, 7f, 7f, paint)
@@ -479,20 +486,7 @@ class CalibrationActivity : AppCompatActivity() {
             canvas.drawCircle(thumbX, thumbCy, thumbR, paint)
             paint.style = Paint.Style.FILL
 
-            // Min/max labels
-            textPaint.color = TEXT_DIM
-            textPaint.textSize = 9f
-            textPaint.typeface = Typeface.MONOSPACE
-            textPaint.textAlign = Paint.Align.LEFT
-            canvas.drawText(formatVal(minVal), x, trackY + sliderH + 16f, textPaint)
-            textPaint.textAlign = Paint.Align.RIGHT
-            canvas.drawText(formatVal(maxVal), x + w, trackY + sliderH + 16f, textPaint)
-
-            return trackY + sliderH + 24f
-        }
-
-        private fun formatVal(v: Float): String {
-            return if (v == v.toInt().toFloat()) v.toInt().toString() else String.format("%.2f", v)
+            return trackY + sliderH + 8f
         }
 
         private fun drawButton(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
@@ -523,34 +517,20 @@ class CalibrationActivity : AppCompatActivity() {
             canvas.drawText(desc, x + w / 2, y + h + 14f, textPaint)
         }
 
-        // Slider Y ranges for hit detection
+        // Slider Y ranges for hit detection (matches compact drawSlider layout)
         private fun getSliderYRanges(): List<Triple<Float, Float, Float>> {
-            // Returns list of (trackY, trackW, sliderIndex) for each slider
             val colW = width.toFloat() / 2
             val leftW = colW - margin * 1.5f
+            val slotH = sliderH + 8f  // track height + bottom margin per drawSlider
+            val titleToTrack = 18f     // y offset from slot start to trackY
 
-            var sy = headerH + 16f
             val ranges = mutableListOf<Triple<Float, Float, Float>>()
-
-            // Wheel diameter (has subtitle)
-            val track1Y = sy + 20f + 14f + 10f // after title + subtitle + gap
-            ranges.add(Triple(track1Y, leftW, 0f))
-
-            // Diff ratio (has subtitle)
-            val track2Start = track1Y + sliderH + 24f + 8f
-            val track2Y = track2Start + 20f + 14f + 10f // after title + subtitle + gap
-            ranges.add(Triple(track2Y, leftW, 1f))
-
-            // Max RPM (no subtitle)
-            val track3Start = track2Y + sliderH + 24f + 8f
-            val track3Y = track3Start + 20f + 10f // after title + gap
-            ranges.add(Triple(track3Y, leftW, 2f))
-
-            // Max Amps (no subtitle)
-            val track4Start = track3Y + sliderH + 24f + 8f
-            val track4Y = track4Start + 20f + 10f
-            ranges.add(Triple(track4Y, leftW, 3f))
-
+            var sy = headerH + 10f
+            for (i in 0..5) {
+                val trackY = sy + titleToTrack
+                ranges.add(Triple(trackY, leftW, i.toFloat()))
+                sy = trackY + slotH
+            }
             return ranges
         }
 
@@ -703,6 +683,14 @@ class CalibrationActivity : AppCompatActivity() {
                 3 -> {
                     val raw = AMPS_MIN + frac * (AMPS_MAX - AMPS_MIN)
                     maxAmps = (raw / 10).toInt() * 10f // snap to 10s
+                }
+                4 -> {
+                    val raw = CELLS_MIN + frac * (CELLS_MAX - CELLS_MIN)
+                    batteryCells = Math.round(raw).toFloat() // snap to integers
+                }
+                5 -> {
+                    val raw = AH_MIN + frac * (AH_MAX - AH_MIN)
+                    batteryAh = (raw / 5).toInt() * 5f // snap to 5Ah
                 }
             }
         }

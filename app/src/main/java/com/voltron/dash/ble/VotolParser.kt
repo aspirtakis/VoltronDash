@@ -2,43 +2,31 @@ package com.voltron.dash.ble
 
 object VotolParser {
 
-    // BLE UUIDs (ESP32 bridge)
+    // BLE UUIDs (shared by ESP32 bridge and AT-09/HM-10)
     const val SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb"
     const val CHAR_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb"
-    const val DEVICE_NAME = "VOTOL_BLE"
+
+    // Supported device names
+    const val DEVICE_NAME_ESP32 = "VOTOL_BLE"
+    const val DEVICE_NAME_AT09 = "BT05"
+    val DEVICE_NAMES = listOf(DEVICE_NAME_ESP32, DEVICE_NAME_AT09, "MLT-BT05", "HMSoft", "CC41-A")
+
+    // SHOW command with calibration values (sent by Android when using AT-09 direct)
+    val SHOW_CMD = byteArrayOf(
+        0xC9.toByte(), 0x14, 0x02, 0x53, 0x48, 0x4F, 0x57, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0xAA.toByte(), 0x00, 0x00, 0x00,
+        0x1E, 0xAA.toByte(), 0x04, 0x67, 0x00, 0xF3.toByte(), 0x52, 0x0D
+    )
 
     private const val FRAME_SIZE = 24
     private const val HEADER_BYTE = 0xC0
     private const val TYPE_BYTE = 0x14
     private const val TERMINATOR = 0x0D
 
-    // Battery config (same pack as FarDriver)
-    private const val BATTERY_TOTAL_WH = 7992f // 120Ah * 66.6V
     private const val DEFAULT_KM_PER_KWH = 20f
-
-    // SOC voltage table: 18S Li-ion (same as FarDriver)
-    private val SOC_TABLE = arrayOf(
-        54.0f to 0, 59.4f to 5, 63.0f to 10, 64.8f to 20,
-        66.6f to 30, 68.4f to 50, 70.2f to 65, 72.0f to 80,
-        73.8f to 90, 75.6f to 100
-    )
 
     private val STATUS_MAP = arrayOf("IDLE", "INIT", "START", "RUN", "STOP", "BRAKE", "WAIT", "FAULT")
     private val GEAR_MAP = arrayOf("L", "M", "H", "S")
-
-    fun estimateSoc(voltage: Float): Int {
-        if (voltage <= SOC_TABLE.first().first) return SOC_TABLE.first().second
-        if (voltage >= SOC_TABLE.last().first) return SOC_TABLE.last().second
-        for (i in 0 until SOC_TABLE.size - 1) {
-            val (vLo, socLo) = SOC_TABLE[i]
-            val (vHi, socHi) = SOC_TABLE[i + 1]
-            if (voltage in vLo..vHi) {
-                val ratio = (voltage - vLo) / (vHi - vLo)
-                return (socLo + ratio * (socHi - socLo)).toInt()
-            }
-        }
-        return 0
-    }
 
     fun verifyChecksum(data: ByteArray): Boolean {
         if (data.size != FRAME_SIZE) return false
@@ -63,6 +51,7 @@ object VotolParser {
         var status: String = "IDLE"
         var brakeActive: Boolean = false
         var inMotion: Boolean = false
+        var faultCleared: Boolean = false
 
         // Tracking
         var totalKm: Float = 0f
@@ -83,7 +72,7 @@ object VotolParser {
                 controllerTemp = controllerTemp, motorTemp = motorTemp,
                 soc = soc, gear = gear, gearNum = 1,
                 brakeActive = brakeActive, inMotion = inMotion,
-                faultCodes = if (status == "FAULT") listOf("Controller fault") else emptyList(),
+                faultCodes = if (status == "FAULT" && !faultCleared) listOf("Controller fault") else emptyList(),
                 state = status,
                 wheelRatio = 0, wheelRadius = 0, wheelWidth = 0, rateRatio = 1,
                 totalKm = totalKm, sessionKm = sessionKm,
@@ -133,12 +122,18 @@ object VotolParser {
 
         // Status: byte 21
         val statusIdx = (data[21].toInt() and 0xFF)
+        val prevStatus = state.status
         state.status = STATUS_MAP.getOrElse(statusIdx) { "IDLE" }
         state.brakeActive = state.status == "BRAKE"
         state.inMotion = state.status == "RUN"
 
+        // Reset clear flag on new fault
+        if (state.status == "FAULT" && prevStatus != "FAULT") {
+            state.faultCleared = false
+        }
+
         // SOC from voltage
-        val rawSoc = estimateSoc(state.voltage)
+        val rawSoc = FarDriverParser.estimateSoc(state.voltage)
         if (state.smoothedSoc < 0) {
             state.smoothedSoc = rawSoc.toFloat()
         } else {
@@ -167,7 +162,7 @@ object VotolParser {
         state.lastEnergyTime = now
 
         // Range estimate
-        val remainingKwh = state.soc / 100f * BATTERY_TOTAL_WH / 1000f
+        val remainingKwh = state.soc / 100f * FarDriverParser.batteryTotalWh / 1000f
         val kmPerKwh = if (state.kwhUsed > 0.05f && state.totalKm > 0.5f) {
             val measured = state.totalKm / state.kwhUsed
             if (measured in 2f..100f) measured else DEFAULT_KM_PER_KWH

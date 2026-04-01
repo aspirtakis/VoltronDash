@@ -6,6 +6,7 @@ import android.graphics.drawable.BitmapDrawable
 import androidx.core.content.ContextCompat
 import com.voltron.dash.R
 import com.voltron.dash.ble.FarDriverData
+import com.voltron.dash.ble.FarDriverParser
 import com.voltron.dash.ble.JkBmsData
 import java.text.SimpleDateFormat
 import java.util.*
@@ -34,7 +35,7 @@ object DashboardRenderer {
 
     var maxAmps = 150f
     var maxRpm = 5000f
-    private const val BATTERY_TOTAL_KWH = 7.992f
+    private val batteryTotalKwh: Float get() = FarDriverParser.batteryTotalWh / 1000f
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -46,9 +47,20 @@ object DashboardRenderer {
     var glowPhase = 0f
     var resetTrip = false
     var resetAll = false
+    var clearFaults = false
     var fdStatus = "FD: --"
     var bmsStatus = "BMS: --"
     private var logoBitmap: Bitmap? = null
+
+    // GPS state (updated from LocationListener in MainActivity)
+    var gpsSpeed = 0f       // km/h
+    var gpsBearing = 0f     // degrees (0=N, 90=E, 180=S, 270=W)
+    var gpsActive = false
+    var gpsTime = ""        // e.g. "12:34:05 UTC"
+
+    // Shared data for Android Auto (single BLE source from MainActivity)
+    var latestData: FarDriverData = FarDriverData()
+    var latestBmsData: JkBmsData = JkBmsData()
 
     fun init(context: Context) {
         if (logoBitmap == null) {
@@ -61,6 +73,7 @@ object DashboardRenderer {
     var gearButtonRect = RectF()
     var resetButtonRect = RectF()
     var bmsButtonRect = RectF()
+    var faultClearRect = RectF()
     var demoMode = false
 
     private val demoBmsData = JkBmsData(
@@ -126,7 +139,7 @@ object DashboardRenderer {
 
         // === BIG SPEED (left of center) ===
         val adjustedSpeed = data.speedKmh.toInt()
-        drawBigSpeed(canvas, mainX, pad, speedW, topH, adjustedSpeed, data.totalKm, data.totalHours, data.kwhUsed, cr)
+        drawBigSpeed(canvas, mainX, pad, speedW, topH, adjustedSpeed, data.totalKm, data.totalHours, data.kwhUsed, data.faultCodes, cr)
 
         // === DUAL RPM+AMP GAUGE (right of center) ===
         drawDualGauge(canvas, dualX, pad, dualW, topH, data.rpm.toFloat(), data.current, data.rangeKm, cr)
@@ -211,7 +224,8 @@ object DashboardRenderer {
     // BIG SPEED + odometer
     // ============================================================
     private fun drawBigSpeed(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
-                             speed: Int, totalKm: Float, totalHours: Float, kwhUsed: Float, cr: Float) {
+                             speed: Int, totalKm: Float, totalHours: Float, kwhUsed: Float,
+                             faultCodes: List<String>, cr: Float) {
         // Card background
         val grad = LinearGradient(x, y, x, y + h,
             intArrayOf(BG_CARD_LIGHT, BG_CARD), null, Shader.TileMode.CLAMP)
@@ -226,27 +240,91 @@ object DashboardRenderer {
         canvas.drawRoundRect(rectF, cr, cr, paint)
         paint.style = Paint.Style.FILL
 
-        // Speed digits
+        val hasFaults = faultCodes.isNotEmpty()
+
+        // Speed digits — shift up slightly when faults present
         val fontSize = max(36f, min(w * 0.45f, h * 0.48f))
-        textPaint.color = TEXT_PRI
+        val speedY = if (hasFaults) y + h * 0.40f else y + h * 0.48f
+        textPaint.color = if (hasFaults) ACCENT_RED else TEXT_PRI
         textPaint.textSize = fontSize
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-        canvas.drawText(speed.toString(), x + w / 2, y + h * 0.48f, textPaint)
+        canvas.drawText(speed.toString(), x + w / 2, speedY, textPaint)
 
         // km/h label
         textPaint.color = TEXT_DIM
         textPaint.textSize = max(11f, fontSize * 0.18f)
         textPaint.typeface = Typeface.MONOSPACE
-        canvas.drawText("km/h", x + w / 2, y + h * 0.48f + fontSize * 0.38f, textPaint)
+        canvas.drawText("km/h", x + w / 2, speedY + fontSize * 0.38f, textPaint)
 
-        // Odometer line
+        // Odometer line — shift up when GPS is showing
+        val showGps = gpsActive && !hasFaults
+        val odoY = if (hasFaults) y + h * 0.72f else if (showGps) y + h * 0.82f else y + h * 0.88f
         val odoSize = max(10f, fontSize * 0.15f)
         textPaint.color = Color.WHITE
         textPaint.textSize = odoSize
         textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
         val odoStr = String.format("%.1f km  %.1f h  %.2f kWh", totalKm, totalHours, kwhUsed)
-        canvas.drawText(odoStr, x + w / 2, y + h * 0.88f, textPaint)
+        canvas.drawText(odoStr, x + w / 2, odoY, textPaint)
+
+        // GPS info line (below odometer, only when active and no faults)
+        if (showGps) {
+            val gpsY = y + h * 0.96f
+            val gpsSize = max(9f, fontSize * 0.13f)
+
+            // Compass arrow character based on bearing
+            val cardinal = bearingToCardinal(gpsBearing)
+            val arrow = bearingToArrow(gpsBearing)
+            val gpsStr = String.format("GPS: %d km/h  %s %s  %s",
+                gpsSpeed.toInt(), arrow, cardinal, gpsTime)
+
+            textPaint.color = ACCENT_BLUE
+            textPaint.textSize = gpsSize
+            textPaint.textAlign = Paint.Align.CENTER
+            textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            canvas.drawText(gpsStr, x + w / 2, gpsY, textPaint)
+        }
+
+        // Fault codes (below odometer)
+        faultClearRect.set(0f, 0f, 0f, 0f) // reset
+        if (hasFaults) {
+            val faultSize = max(9f, fontSize * 0.14f)
+            val faultStr = faultCodes.joinToString(" | ")
+            val faultY = odoY + faultSize + 6f
+
+            // Red background strip
+            val stripPad = 4f
+            val stripH = faultSize + stripPad * 2 + 2f
+            val stripY = faultY - faultSize - stripPad + 2f
+            paint.color = adjustAlpha(ACCENT_RED, 0.2f)
+            rectF.set(x + 4f, stripY, x + w - 4f, stripY + stripH)
+            canvas.drawRoundRect(rectF, 4f, 4f, paint)
+
+            // Fault text
+            textPaint.color = ACCENT_RED
+            textPaint.textSize = faultSize
+            textPaint.textAlign = Paint.Align.LEFT
+            textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            canvas.drawText(faultStr, x + 10f, faultY, textPaint)
+
+            // CLR button (right side of strip)
+            val clrW = faultSize * 3f
+            val clrX = x + w - clrW - 8f
+            paint.color = ACCENT_RED
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 1.5f
+            rectF.set(clrX, stripY + 1f, clrX + clrW, stripY + stripH - 1f)
+            canvas.drawRoundRect(rectF, 4f, 4f, paint)
+            paint.style = Paint.Style.FILL
+
+            textPaint.color = ACCENT_RED
+            textPaint.textSize = faultSize
+            textPaint.textAlign = Paint.Align.CENTER
+            textPaint.typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            canvas.drawText("CLR", clrX + clrW / 2, faultY, textPaint)
+
+            faultClearRect.set(clrX, stripY, clrX + clrW, stripY + stripH)
+        }
     }
 
     // ============================================================
@@ -460,9 +538,9 @@ object DashboardRenderer {
         val startAngle = 135f
         val sweepAngle = 270f
 
-        val remainKwh = soc / 100f * BATTERY_TOTAL_KWH
+        val remainKwh = soc / 100f * batteryTotalKwh
         val remainRatio = (soc / 100f).coerceIn(0f, 1f)
-        val usedRatio = (kwhUsed / BATTERY_TOTAL_KWH).coerceIn(0f, 1f)
+        val usedRatio = (kwhUsed / batteryTotalKwh).coerceIn(0f, 1f)
         val glow = 0.7f + 0.3f * sin(glowPhase)
 
         // --- Outer ring: remaining kWh ---
@@ -931,7 +1009,7 @@ object DashboardRenderer {
         paint.style = Paint.Style.FILL
 
         // Remaining kWh
-        val remainKwh = soc / 100f * BATTERY_TOTAL_KWH
+        val remainKwh = soc / 100f * batteryTotalKwh
         textPaint.color = ACCENT_BLUE
         textPaint.textSize = max(8f, radius * 0.42f)
         textPaint.textAlign = Paint.Align.CENTER
@@ -1187,5 +1265,17 @@ object DashboardRenderer {
     private fun adjustAlpha(color: Int, alpha: Float): Int {
         val a = (alpha * 255).toInt().coerceIn(0, 255)
         return Color.argb(a, Color.red(color), Color.green(color), Color.blue(color))
+    }
+
+    private fun bearingToCardinal(bearing: Float): String {
+        val dirs = arrayOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+        val idx = ((bearing + 22.5f) / 45f).toInt() % 8
+        return dirs[idx]
+    }
+
+    private fun bearingToArrow(bearing: Float): String {
+        val arrows = arrayOf("\u2191", "\u2197", "\u2192", "\u2198", "\u2193", "\u2199", "\u2190", "\u2196")
+        val idx = ((bearing + 22.5f) / 45f).toInt() % 8
+        return arrows[idx]
     }
 }

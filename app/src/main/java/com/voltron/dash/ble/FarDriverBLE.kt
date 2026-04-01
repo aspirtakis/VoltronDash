@@ -186,6 +186,11 @@ class FarDriverBLE(
                 state.sessionStartTime = System.currentTimeMillis()
             }
 
+            if (com.voltron.dash.render.DashboardRenderer.clearFaults) {
+                com.voltron.dash.render.DashboardRenderer.clearFaults = false
+                state.faultCodes.clear()
+            }
+
             val changed = FarDriverParser.parseFrame(data, state)
             if (changed) {
                 val snapshot = state.toData()

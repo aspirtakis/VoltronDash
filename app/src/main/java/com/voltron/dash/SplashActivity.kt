@@ -21,6 +21,12 @@ class SplashActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // If app is already running, just bring it to front — skip splash
+        if (!isTaskRoot()) {
+            finish()
+            return
+        }
+
         // Fullscreen immersive
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val controller = WindowInsetsControllerCompat(window, window.decorView)

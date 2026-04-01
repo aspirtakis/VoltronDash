@@ -1,7 +1,12 @@
 package com.voltron.dash.auto
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.graphics.Canvas
 import android.graphics.Rect
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -13,11 +18,12 @@ import androidx.car.app.SurfaceContainer
 import androidx.car.app.model.Action
 import androidx.car.app.model.Template
 import androidx.car.app.navigation.model.NavigationTemplate
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
-import com.voltron.dash.ble.FarDriverBLE
-import com.voltron.dash.ble.FarDriverData
 import com.voltron.dash.render.DashboardRenderer
+import java.text.SimpleDateFormat
+import java.util.*
 
 class DashScreen(carContext: CarContext) : Screen(carContext) {
 
@@ -27,10 +33,24 @@ class DashScreen(carContext: CarContext) : Screen(carContext) {
     }
 
     private var surfaceContainer: SurfaceContainer? = null
-    private var data: FarDriverData = FarDriverData()
-    private var ble: FarDriverBLE? = null
     private val handler = Handler(Looper.getMainLooper())
     private var rendering = false
+    private var locationManager: LocationManager? = null
+    private val utcFormat = SimpleDateFormat("HH:mm:ss", Locale.US).apply {
+        timeZone = TimeZone.getTimeZone("UTC")
+    }
+    private val locationListener = object : LocationListener {
+        override fun onLocationChanged(location: Location) {
+            DashboardRenderer.gpsSpeed = location.speed * 3.6f
+            DashboardRenderer.gpsBearing = if (location.hasBearing()) location.bearing else 0f
+            DashboardRenderer.gpsTime = utcFormat.format(Date(location.time)) + " UTC"
+            DashboardRenderer.gpsActive = true
+        }
+        override fun onProviderDisabled(provider: String) {
+            DashboardRenderer.gpsActive = false
+        }
+        override fun onProviderEnabled(provider: String) {}
+    }
 
     private val renderRunnable = object : Runnable {
         override fun run() {
@@ -61,10 +81,10 @@ class DashScreen(carContext: CarContext) : Screen(carContext) {
         lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onDestroy(owner: LifecycleOwner) {
                 stopRendering()
-                ble?.stop()
+                locationManager?.removeUpdates(locationListener)
             }
         })
-        startBLE()
+        startGPS()
     }
 
     override fun onGetTemplate(): Template {
@@ -77,17 +97,20 @@ class DashScreen(carContext: CarContext) : Screen(carContext) {
             .build()
     }
 
-    private fun startBLE() {
-        ble = FarDriverBLE(
-            context = carContext,
-            onData = { newData ->
-                data = newData
-            },
-            onStatus = { status ->
-                Log.d(TAG, "BLE: $status")
-            }
-        )
-        ble?.start()
+    private fun startGPS() {
+        if (ContextCompat.checkSelfPermission(carContext,
+                Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            Log.d(TAG, "GPS: no location permission")
+            return
+        }
+        val lm = carContext.getSystemService(LocationManager::class.java) ?: return
+        if (!lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+            Log.d(TAG, "GPS: provider not enabled")
+            return
+        }
+        locationManager = lm
+        lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, locationListener, Looper.getMainLooper())
+        Log.d(TAG, "GPS: location updates started")
     }
 
     private fun startRendering() {
@@ -112,7 +135,9 @@ class DashScreen(carContext: CarContext) : Screen(carContext) {
         try {
             val canvas: Canvas = surface.lockCanvas(null) ?: return
             try {
-                DashboardRenderer.draw(canvas, w, h, data)
+                // Use shared data from MainActivity's BLE connections
+                DashboardRenderer.draw(canvas, w, h,
+                    DashboardRenderer.latestData, DashboardRenderer.latestBmsData)
             } finally {
                 surface.unlockCanvasAndPost(canvas)
             }

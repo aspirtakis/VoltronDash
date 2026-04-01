@@ -4,6 +4,9 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -16,6 +19,8 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import android.util.Log
+import java.text.SimpleDateFormat
+import java.util.*
 import com.voltron.dash.ble.FarDriverBLE
 import com.voltron.dash.ble.FarDriverParser
 import com.voltron.dash.ble.JkBmsBLE
@@ -36,6 +41,22 @@ class MainActivity : AppCompatActivity() {
     private var currentBmsMac: String? = null
     private var currentControllerType: String = CalibrationActivity.CTRL_FARDRIVER
     private val handler = Handler(Looper.getMainLooper())
+    private var locationManager: LocationManager? = null
+    private val utcFormat = SimpleDateFormat("HH:mm:ss", Locale.US).apply {
+        timeZone = TimeZone.getTimeZone("UTC")
+    }
+    private val locationListener = object : LocationListener {
+        override fun onLocationChanged(location: Location) {
+            DashboardRenderer.gpsSpeed = location.speed * 3.6f  // m/s -> km/h
+            DashboardRenderer.gpsBearing = if (location.hasBearing()) location.bearing else 0f
+            DashboardRenderer.gpsTime = utcFormat.format(Date(location.time)) + " UTC"
+            DashboardRenderer.gpsActive = true
+        }
+        override fun onProviderDisabled(provider: String) {
+            DashboardRenderer.gpsActive = false
+        }
+        override fun onProviderEnabled(provider: String) {}
+    }
 
     private val refreshRunnable = object : Runnable {
         override fun run() {
@@ -83,6 +104,7 @@ class MainActivity : AppCompatActivity() {
 
         if (hasPermissions()) {
             startBLE()
+            startGPS()
         } else {
             requestPermissions()
         }
@@ -137,6 +159,7 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         stopControllerBLE()
         bmsBle?.stop()
+        locationManager?.removeUpdates(locationListener)
     }
 
     private fun stopControllerBLE() {
@@ -152,6 +175,10 @@ class MainActivity : AppCompatActivity() {
             CalibrationActivity.KEY_WHEEL_DIAMETER, CalibrationActivity.DIAMETER_DEFAULT)
         FarDriverParser.diffRatio = prefs.getFloat(
             CalibrationActivity.KEY_DIFF_RATIO, CalibrationActivity.DIFF_DEFAULT)
+        FarDriverParser.batteryCells = prefs.getFloat(
+            CalibrationActivity.KEY_BATTERY_S, CalibrationActivity.CELLS_DEFAULT).toInt()
+        FarDriverParser.batteryAh = prefs.getFloat(
+            CalibrationActivity.KEY_BATTERY_AH, CalibrationActivity.AH_DEFAULT)
 
         DashboardRenderer.maxRpm = prefs.getFloat(
             CalibrationActivity.KEY_MAX_RPM,
@@ -170,13 +197,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun getRequiredPermissions(): Array<String> {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            // Android 12+: only BLE permissions, no location needed
+            // Android 12+: BLE permissions + location for GPS
             arrayOf(
                 Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_CONNECT
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.ACCESS_FINE_LOCATION
             )
         } else {
-            // Android 11 and below: location required for BLE scan
+            // Android 11 and below: location required for BLE scan + GPS
             arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
         }
     }
@@ -187,8 +215,16 @@ class MainActivity : AppCompatActivity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == PERMISSION_REQUEST && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
-            startBLE()
+        if (requestCode == PERMISSION_REQUEST) {
+            // Start BLE if all permissions granted (or at least BLE ones)
+            if (grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                startBLE()
+                startGPS()
+            } else {
+                // Start BLE anyway if BLE perms are granted; GPS is best-effort
+                startBLE()
+                startGPS()  // will silently fail if location denied
+            }
         }
     }
 
@@ -201,6 +237,7 @@ class MainActivity : AppCompatActivity() {
 
         val onData: (com.voltron.dash.ble.FarDriverData) -> Unit = { data ->
             dashView.data = data
+            DashboardRenderer.latestData = data
             val tag = if (currentControllerType == CalibrationActivity.CTRL_VOTOL) "VT" else "FD"
             DashboardRenderer.fdStatus = "$tag: Live"
             // Start BMS only after controller is streaming and if enabled
@@ -243,6 +280,7 @@ class MainActivity : AppCompatActivity() {
                 Log.i("VoltronDash", "BMS data: V=${data.totalVoltage} SOC=${data.soc}% cells=${data.cellCount}")
                 dashView.bmsData = data
                 BmsActivity.latestBmsData = data
+                DashboardRenderer.latestBmsData = data
             },
             onStatus = { status ->
                 Log.i("VoltronDash", "BMS: $status")
@@ -250,5 +288,21 @@ class MainActivity : AppCompatActivity() {
             }
         )
         bmsBle?.start()
+    }
+
+    private fun startGPS() {
+        if (ActivityCompat.checkSelfPermission(this,
+                Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            Log.i("VoltronDash", "GPS: no location permission, skipping")
+            return
+        }
+        val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return
+        if (!lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+            Log.i("VoltronDash", "GPS: provider not enabled")
+            return
+        }
+        locationManager = lm
+        lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, locationListener, Looper.getMainLooper())
+        Log.i("VoltronDash", "GPS: location updates started")
     }
 }
